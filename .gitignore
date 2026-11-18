@@ -1,0 +1,52 @@
+# dependencies
+node_modules/
+
+# builds
+dist/
+web-build/
+.vite/
+
+# Expo
+.expo/
+.expo-check/
+expo-env.d.ts
+
+# Metro
+.metro-health-check*
+
+# secrets — keep .env.example
+.env
+.env.*
+!.env.example
+!**/.env.example
+
+# uploaded RR PDFs
+backend/storage/
+
+# logs
+*.log
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# native signing
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*.pem
+*.orig.*
+.kotlin/
+
+# generated native projects
+mobile/ios/
+mobile/android/
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# TypeScript
+*.tsbuildinfo
