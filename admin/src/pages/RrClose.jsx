@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../api';
+import { useAuth } from '../App';
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
@@ -45,12 +46,44 @@ function openDocument(report) {
 }
 
 export default function RrClose() {
+  const { user } = useAuth();
   const { id } = useParams();
+  const navigate = useNavigate();
   const [report, setReport] = useState(null);
+  const [missing, setMissing] = useState(null);
   const [error, setError] = useState('');
 
+  function closeReceipt() {
+    setError('');
+    return api(`/api/receipts/${id}/close`, { method: 'POST' })
+      .then((data) => {
+        setMissing(null);
+        setReport(data.close);
+      })
+      .catch((err) => setError(err.message));
+  }
+
   useEffect(() => {
-    api(`/api/receipts/${id}/close`, { method: 'POST' }).then((data) => setReport(data.close)).catch((err) => setError(err.message));
+    let cancel = false;
+    api(`/api/receipts/${id}/close`)
+      .then((data) => {
+        if (cancel) return null;
+        if (data.close.closed || !data.close.missingLoads?.length) {
+          if (data.close.closed) {
+            setReport(data.close);
+            return null;
+          }
+          return api(`/api/receipts/${id}/close`, { method: 'POST' }).then((saved) => {
+            if (!cancel) setReport(saved.close);
+          });
+        }
+        setMissing(data.close.missingLoads);
+        return null;
+      })
+      .catch((err) => {
+        if (!cancel) setError(err.message);
+      });
+    return () => { cancel = true; };
   }, [id]);
 
   function run(action) {
@@ -58,7 +91,28 @@ export default function RrClose() {
     Promise.resolve(action()).catch((err) => setError(err.message));
   }
 
-  if (!report) return error ? <div className="banner">{error}</div> : <p>Loading…</p>;
+  if (!report) {
+    return (
+      <>
+        {error ? <div className="banner">{error}</div> : <p>Loading…</p>}
+        {missing ? (
+          <div className="alert-mask">
+            <div className="alert-card">
+              <h2>Load entry is still not entered</h2>
+              <p>This RR has a truck with no load entry.</p>
+              <ul>
+                {missing.map((truck) => <li key={truck.sno}>{truck.truckNo}</li>)}
+              </ul>
+              <div className="alert-actions">
+                <button className="btn ghost" type="button" onClick={() => navigate(-1)}>Exit</button>
+                <button className="btn danger" type="button" onClick={closeReceipt}>Close anyway</button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+      </>
+    );
+  }
 
   return (
     <div>
@@ -82,6 +136,14 @@ export default function RrClose() {
             link.click();
             URL.revokeObjectURL(url);
           })}>Download</button>
+          {user.role === 'owner' ? (
+            <button className="btn" type="button" onClick={() => {
+              setError('');
+              api(`/api/receipts/${id}/open`, { method: 'POST' })
+                .then(() => navigate(`/receipts/${id}`))
+                .catch((err) => setError(err.message));
+            }}>Reopen RR</button>
+          ) : null}
           <Link className="btn ghost" to="/receipts">Back</Link>
         </div>
       </div>

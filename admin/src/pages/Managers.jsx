@@ -44,24 +44,26 @@ export default function Managers() {
     <div className="stack">
       <div className="page-title">
         <div>
-          <div className="mark">Owner</div>
+          <div className="mark">Admin</div>
           <h1>Managers</h1>
           <p>Managers can log in on the admin panel and the mobile app, and upload an eT-RR.</p>
         </div>
       </div>
       {error && <div className="banner">{error}</div>}
-      <form className="card section manager-form" onSubmit={createUser}>
+      <form className="card section manager-form" onSubmit={createUser} autoComplete="off">
+        <input className="autofill-trap" tabIndex={-1} aria-hidden="true" type="text" name="trap-username" autoComplete="username" />
+        <input className="autofill-trap" tabIndex={-1} aria-hidden="true" type="password" name="trap-password" autoComplete="current-password" />
         <div>
-          <label htmlFor="name">Name</label>
-          <input id="name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+          <label htmlFor="manager-name">Name</label>
+          <input id="manager-name" name="manager-name" autoComplete="off" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
         </div>
         <div>
-          <label htmlFor="username">Username</label>
-          <input id="username" value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} />
+          <label htmlFor="manager-username">Username</label>
+          <input id="manager-username" name="manager-username" autoComplete="off" readOnly onFocus={(event) => { event.target.readOnly = false; }} value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} />
         </div>
         <div>
-          <label htmlFor="password">Password</label>
-          <input id="password" type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} />
+          <label htmlFor="manager-password">Password</label>
+          <input id="manager-password" name="manager-password" type="password" autoComplete="new-password" readOnly onFocus={(event) => { event.target.readOnly = false; }} value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} />
         </div>
         <button className="btn" disabled={busy} type="submit">{busy ? 'Adding…' : 'Add manager'}</button>
       </form>
@@ -72,7 +74,7 @@ export default function Managers() {
               <th>Name</th>
               <th>Username</th>
               <th>Role</th>
-              <th>Receipts</th>
+              <th>RR</th>
               <th>Created</th>
               <th></th>
             </tr>
@@ -82,7 +84,7 @@ export default function Managers() {
               <tr key={person.id}>
                 <td>{person.name}</td>
                 <td>{person.username}</td>
-                <td>{person.role === 'owner' ? 'Owner' : 'Manager'}</td>
+                <td>{person.role === 'owner' ? 'Admin' : 'Manager'}</td>
                 <td>{person.receipt_count}</td>
                 <td>{formatWhen(person.created_at)}</td>
                 <td>

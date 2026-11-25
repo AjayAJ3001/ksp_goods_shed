@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
-import { api, downloadStoredPdf, formatWhen, openStoredPdf } from '../api';
+import { api } from '../api';
+import StoredPdfTable from '../StoredPdfTable';
 
 export default function RrMaster() {
   const [file, setFile] = useState(null);
@@ -37,17 +37,6 @@ export default function RrMaster() {
     }
   }
 
-  async function openOriginal(item, download) {
-    setError('');
-    try {
-      const path = `/api/rr-masters/${item.id}/file`;
-      if (download) await downloadStoredPdf(path, item.fileName);
-      else await openStoredPdf(path);
-    } catch (err) {
-      setError(err.message);
-    }
-  }
-
   return (
     <div>
       <div className="page-title">
@@ -66,36 +55,11 @@ export default function RrMaster() {
         </div>
         <button className="btn" disabled={busy} type="submit">{busy ? 'Storing…' : 'Store original PDF'}</button>
       </form>
-      <section className="card table-wrap" style={{ marginTop: 16 }}>
-        <table>
-          <thead>
-            <tr>
-              <th>Original PDF</th>
-              <th>RR No</th>
-              <th>Uploaded</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {masters.map((item) => (
-              <tr key={item.id}>
-                <td>
-                  <strong>{item.fileName}</strong>
-                  <div className="meta">{item.uploadedBy}</div>
-                </td>
-                <td>{item.rrNo || '—'}</td>
-                <td>{formatWhen(item.uploadedAt)}</td>
-                <td className="tools">
-                  <button className="btn" type="button" onClick={() => openOriginal(item, false)}>Open</button>
-                  <button className="btn ghost" type="button" onClick={() => openOriginal(item, true)}>Download</button>
-                  {item.receiptId ? <Link to={`/receipts/${item.receiptId}`}>Receipt</Link> : null}
-                </td>
-              </tr>
-            ))}
-            {!masters.length && <tr><td colSpan="4">No original PDFs stored yet.</td></tr>}
-          </tbody>
-        </table>
-      </section>
+      <StoredPdfTable
+          items={masters}
+          filePath={(item) => `/api/rr-masters/${item.id}/file`}
+          empty="No original PDFs stored yet."
+        />
     </div>
   );
 }

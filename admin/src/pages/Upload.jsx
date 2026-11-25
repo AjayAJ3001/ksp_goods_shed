@@ -1,14 +1,27 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../api';
+
+function expandedPartyName(parties, typed, previous = '') {
+  const query = String(typed || '').trim().toLowerCase();
+  const matches = parties.filter((party) => party.name.toLowerCase().includes(query));
+  const growing = String(typed).length >= String(previous).length;
+  if (query.length >= 3 && matches.length === 1 && growing) return matches[0].name;
+  return typed;
+}
 
 export default function Upload() {
   const navigate = useNavigate();
   const [file, setFile] = useState(null);
   const [receipt, setReceipt] = useState(null);
   const [partyName, setPartyName] = useState('');
+  const [parties, setParties] = useState([]);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api('/api/parties').then((data) => setParties(data.parties || [])).catch(() => {});
+  }, []);
 
   async function uploadPdf(event) {
     event.preventDefault();
@@ -38,7 +51,7 @@ export default function Upload() {
         method: 'POST',
         body: {
           pendingId: receipt.pendingId,
-          partyName,
+          partyName: expandedPartyName(parties, partyName, partyName),
           sheds: receipt.wagons.map((wagon) => ({ sno: wagon.sno, shedNo: wagon.shedNo })),
         },
       });
@@ -118,7 +131,16 @@ export default function Upload() {
           </section>
           <section className="card section">
             <label htmlFor="party">Party name</label>
-            <input id="party" value={partyName} onChange={(e) => setPartyName(e.target.value)} placeholder="Type the party name" />
+            <input
+              id="party"
+              value={partyName}
+              onChange={(e) => setPartyName(expandedPartyName(parties, e.target.value, partyName))}
+              placeholder="Type the party name"
+              list="party-names"
+            />
+            <datalist id="party-names">
+              {parties.map((party) => <option key={party.id} value={party.name} />)}
+            </datalist>
           </section>
           <div className="tools">
             <button className="btn" disabled={busy} type="submit">{busy ? 'Saving…' : 'Submit'}</button>

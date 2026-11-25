@@ -2,7 +2,7 @@ import jwt from 'jsonwebtoken';
 
 export function signUser(user) {
   return jwt.sign(
-    { id: user.id, username: user.username, role: user.role, name: user.name },
+    { id: user.id, username: user.username, role: user.role, name: user.role === 'owner' ? 'Admin' : user.name },
     process.env.JWT_SECRET,
     { expiresIn: '7d' }
   );
@@ -11,7 +11,7 @@ export function signUser(user) {
 export function publicUser(user) {
   return {
     id: user.id,
-    name: user.name,
+    name: user.role === 'owner' ? 'Admin' : user.name,
     username: user.username,
     role: user.role,
   };
@@ -31,7 +31,7 @@ export function requireAuth(req, res, next) {
 
 export function requireOwner(req, res, next) {
   if (req.user?.role !== 'owner') {
-    return res.status(403).json({ error: 'Only the owner can do that.' });
+    return res.status(403).json({ error: 'Only the admin can do that.' });
   }
   return next();
 }

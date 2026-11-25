@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../api';
-import { downloadReport, printReport, shareReport, viewReport } from '../reportDocument';
+import { downloadReport, printReport, reportColumns, reportDocument, shareReport } from '../reportDocument';
 
 const MODES = [
   { id: 'rr', label: 'RR No' },
@@ -68,6 +68,7 @@ export default function Reports() {
   const [value, setValue] = useState('');
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
+  const [preview, setPreview] = useState('');
 
   useEffect(() => {
     api('/api/reports').then((data) => setRows(data.rows || [])).catch((err) => setError(err.message));
@@ -98,7 +99,7 @@ export default function Reports() {
         </div>
       </div>
       {error && <div className="banner">{error}</div>}
-      <div className="report-filters" style={{ paddingLeft: 0 }}>
+      <div className="report-filters">
         {MODES.map((item) => (
           <button key={item.id} className={item.id === mode ? 'btn' : 'btn ghost'} type="button" onClick={() => changeMode(item.id)}>{item.label}</button>
         ))}
@@ -125,44 +126,49 @@ export default function Reports() {
         )}
       </div>
       {report.groups.map((group) => (
-        <section key={group.title} className="card" style={{ marginBottom: 12 }}>
+        <section key={group.title} className="card">
           <div className="section-head">
             <h2>{group.title}</h2>
           </div>
-          <div className="report-fields">
-            {group.items.map((item) => (
-              <article key={`${item.rrNo}-${item.truckNo}-${item.setNo}`} className="report-entry">
-                {[
-                  ['Serial no', item.sno],
-                  ['Truck number', item.truckNo],
-                  ['RR No', item.rrNo],
-                  ['RR Date', item.rrDate],
-                  ['FNR', item.fnr],
-                  ['Date', item.date],
-                  ['Station From', item.stationFrom],
-                  ['Station To', item.stationTo],
-                  ['Commodity', item.commodity],
-                  ['Party name', item.partyName],
-                  ['Delivery to', item.deliveryTo],
-                  ['Bags', item.bags],
-                  ['Set no', item.setNo],
-                  ['Total bags', item.totalBags],
-                  ['Balance bags', item.balanceBags],
-                ].map(([label, value]) => (
-                  <div key={label}><span>{label}</span><strong>{value || '—'}</strong></div>
+          <div className="report-scroll">
+            <table className="report-grid">
+              <thead>
+                <tr>
+                  {reportColumns().map(([label]) => <th key={label}>{label}</th>)}
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {group.items.map((item) => (
+                  <tr key={`${item.rrNo}-${item.truckNo}-${item.setNo}`}>
+                    {reportColumns(item).map(([label, field]) => <td key={label}>{field === 0 || field ? field : '—'}</td>)}
+                    <td>
+                      <div className="tools">
+                        <button className="btn" type="button" onClick={() => setPreview(reportDocument(oneReport(item)))}>View</button>
+                        <button className="btn" type="button" onClick={() => printReport(oneReport(item))}>Print</button>
+                        <button className="btn gold" type="button" onClick={() => shareReport(oneReport(item)).catch((err) => setError(err.message))}>Share</button>
+                        <button className="btn ghost" type="button" onClick={() => downloadReport(oneReport(item))}>Download</button>
+                      </div>
+                    </td>
+                  </tr>
                 ))}
-                <div className="tools">
-                  <button className="btn" type="button" onClick={() => viewReport(oneReport(item))}>View</button>
-                  <button className="btn" type="button" onClick={() => printReport(oneReport(item))}>Print</button>
-                  <button className="btn gold" type="button" onClick={() => shareReport(oneReport(item))}>Share</button>
-                  <button className="btn ghost" type="button" onClick={() => downloadReport(oneReport(item))}>Download</button>
-                </div>
-              </article>
-            ))}
+              </tbody>
+            </table>
           </div>
         </section>
       ))}
       {!report.groups.length && !error && <p className="hint">No trucks have taken bags yet.</p>}
+      {preview ? (
+        <div className="preview-back" role="dialog" aria-label="Report">
+          <div className="preview-card">
+            <div className="preview-bar">
+              <strong>Report</strong>
+              <button className="btn ghost" type="button" onClick={() => setPreview('')}>Close</button>
+            </div>
+            <iframe className="preview-frame" title="Report" srcDoc={preview} />
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

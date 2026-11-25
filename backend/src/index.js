@@ -7,8 +7,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import multer from 'multer';
 import { fileURLToPath } from 'node:url';
+import { auditActions, clientSource, writeAudit } from './audit.js';
 import { publicUser, requireAuth, requireOwner, signUser } from './auth.js';
 import { initDb, pool } from './db.js';
+import { officialPartyName } from './partyName.js';
 import { parseEtRr, toIsoDate } from './parseReceipt.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -22,7 +24,11 @@ const upload = multer({
   limits: { fileSize: 20 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
     const name = (file.originalname || '').toLowerCase();
-    if (file.mimetype === 'application/pdf' || name.endsWith('.pdf')) return cb(null, true);
+    const type = (file.mimetype || '').toLowerCase();
+    const namedPdf = name.endsWith('.pdf');
+    const typedPdf = type === 'application/pdf' || type === 'application/x-pdf';
+    const unnamed = !type || type === 'application/octet-stream' || type === 'binary/octet-stream';
+    if (namedPdf || typedPdf || unnamed) return cb(null, true);
     const error = new Error('Upload a PDF file.');
     error.status = 400;
     return cb(error);
@@ -47,6 +53,7 @@ const receiptSelect = `
     r.file_hash,
     r.status,
     r.closed_at,
+    r.started_at,
     r.uploaded_at,
     r.submitted_at,
     r.uploaded_by,
@@ -57,6 +64,11 @@ const receiptSelect = `
   FROM receipts r
   JOIN users u ON u.id = r.uploaded_by
 `;
+
+async function savedPartyName(typed) {
+  const result = await pool.query(`SELECT name FROM parties WHERE status = 'ACTIVE' ORDER BY name`);
+  return officialPartyName(typed, result.rows.map((row) => row.name));
+}
 
 function mapReceipt(row, wagons, sets) {
   const receipt = {
@@ -74,6 +86,8 @@ function mapReceipt(row, wagons, sets) {
     fileName: row.file_name,
     status: row.status,
     closed: Boolean(row.closed_at),
+    started: Boolean(row.started_at),
+    active: Boolean(row.started_at) && !row.closed_at,
     uploadedAt: row.uploaded_at,
     submittedAt: row.submitted_at,
     uploadedBy: {
@@ -107,31 +121,52 @@ async function setsByReceipt(receiptIds) {
   const ids = [...new Set(receiptIds.map(Number).filter(Boolean))];
   const grouped = new Map();
   if (!ids.length) return grouped;
-  const result = await pool.query(
-    `SELECT w.receipt_id, w.shed_no AS set_no,
-            SUM(w.article_count)::int AS total_bags,
-            COALESCE(MAX(used.used_bags), 0)::int AS used_bags
-     FROM wagons w
-     LEFT JOIN (
-       SELECT t.receipt_id, l.set_no::text AS set_no, SUM(l.bags)::int AS used_bags
-       FROM loads l
-       JOIN trucks t ON t.id = l.truck_id
-       WHERE t.receipt_id = ANY($1::int[])
-       GROUP BY t.receipt_id, l.set_no
-     ) used ON used.receipt_id = w.receipt_id AND used.set_no = w.shed_no
-     WHERE w.receipt_id = ANY($1::int[])
-     GROUP BY w.receipt_id, w.shed_no
-     ORDER BY w.receipt_id,
-              CASE WHEN w.shed_no ~ '^[0-9]+$' THEN w.shed_no::int ELSE 999 END,
-              w.shed_no`,
-    [ids]
-  );
+  const [result, wagonResult] = await Promise.all([
+    pool.query(
+      `SELECT w.receipt_id, w.shed_no AS set_no,
+              SUM(w.article_count)::int AS total_bags,
+              COALESCE(MAX(used.used_bags), 0)::int AS used_bags
+       FROM wagons w
+       LEFT JOIN (
+         SELECT t.receipt_id, l.set_no::text AS set_no, SUM(l.bags)::int AS used_bags
+         FROM loads l
+         JOIN trucks t ON t.id = l.truck_id
+         WHERE t.receipt_id = ANY($1::int[])
+         GROUP BY t.receipt_id, l.set_no
+       ) used ON used.receipt_id = w.receipt_id AND used.set_no = w.shed_no
+       WHERE w.receipt_id = ANY($1::int[])
+       GROUP BY w.receipt_id, w.shed_no
+       ORDER BY w.receipt_id,
+                CASE WHEN w.shed_no ~ '^[0-9]+$' THEN w.shed_no::int ELSE 999 END,
+                w.shed_no`,
+      [ids]
+    ),
+    pool.query(
+      `SELECT w.id, w.receipt_id, w.shed_no, w.wagon_no, w.sno, w.article_count,
+              COALESCE(SUM(l.bags), 0)::int AS used_bags
+       FROM wagons w
+       LEFT JOIN loads l ON l.wagon_id = w.id
+       WHERE w.receipt_id = ANY($1::int[])
+       GROUP BY w.id
+       ORDER BY w.sno`,
+      [ids]
+    ),
+  ]);
   for (const row of result.rows) {
     const list = grouped.get(row.receipt_id) || [];
+    const wagons = wagonResult.rows
+      .filter((wagon) => wagon.receipt_id === row.receipt_id && String(wagon.shed_no) === String(row.set_no))
+      .map((wagon) => ({
+        id: wagon.id,
+        wagonNo: wagon.wagon_no,
+        articleCount: wagon.article_count,
+        balanceBags: wagon.article_count - wagon.used_bags,
+      }));
     list.push({
       setNo: row.set_no,
       totalBags: row.total_bags,
       balanceBags: row.total_bags - row.used_bags,
+      wagons,
     });
     grouped.set(row.receipt_id, list);
   }
@@ -145,8 +180,14 @@ async function setsFor(receiptId) {
 
 async function wagonsFor(receiptId) {
   const result = await pool.query(
-    `SELECT id, sno, owning_rly, wagon_type, wagon_no, article_count, shed_no
-     FROM wagons WHERE receipt_id = $1 ORDER BY sno`,
+    `SELECT w.id, w.sno, w.owning_rly, w.wagon_type, w.wagon_no,
+            GREATEST(w.article_count - COALESCE(SUM(l.bags), 0), 0)::int AS article_count,
+            w.shed_no
+     FROM wagons w
+     LEFT JOIN loads l ON l.wagon_id = w.id
+     WHERE w.receipt_id = $1
+     GROUP BY w.id
+     ORDER BY w.sno`,
     [receiptId]
   );
   return result.rows.map(mapWagon);
@@ -176,8 +217,46 @@ async function findDuplicate(fileHash, rrNo) {
      LIMIT 1`,
     [fileHash, rrNo || '']
   );
-  if (!master.rowCount) return null;
-  const row = master.rows[0];
+  if (master.rowCount) {
+    const row = master.rows[0];
+    return {
+      reason: row.file_hash === fileHash ? 'file' : 'rr',
+      rrNo: row.rr_no,
+      uploadedAt: row.uploaded_at,
+      uploadedBy: row.uploader_name,
+    };
+  }
+  const stored = await pool.query(
+    `SELECT p.file_hash, p.rr_no, p.uploaded_at, u.name AS uploader_name
+     FROM uploaded_pdfs p
+     JOIN users u ON u.id = p.uploaded_by
+     WHERE p.receipt_id IS NOT NULL
+       AND (p.file_hash = $1 OR ($2 <> '' AND p.rr_no = $2))
+     LIMIT 1`,
+    [fileHash, rrNo || '']
+  );
+  if (!stored.rowCount) return null;
+  const row = stored.rows[0];
+  return {
+    reason: row.file_hash === fileHash ? 'file' : 'rr',
+    rrNo: row.rr_no,
+    uploadedAt: row.uploaded_at,
+    uploadedBy: row.uploader_name,
+  };
+}
+
+async function findPreviousUpload(fileHash, rrNo) {
+  const stored = await pool.query(
+    `SELECT p.file_hash, p.rr_no, p.uploaded_at, u.name AS uploader_name
+     FROM uploaded_pdfs p
+     JOIN users u ON u.id = p.uploaded_by
+     WHERE p.file_hash = $1 OR ($2 <> '' AND p.rr_no = $2)
+     ORDER BY p.uploaded_at
+     LIMIT 1`,
+    [fileHash, rrNo || '']
+  );
+  if (!stored.rowCount) return null;
+  const row = stored.rows[0];
   return {
     reason: row.file_hash === fileHash ? 'file' : 'rr',
     rrNo: row.rr_no,
@@ -223,6 +302,7 @@ app.use((req, _res, next) => {
   next();
 });
 app.use(express.json({ limit: '1mb' }));
+app.use(auditActions);
 
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, name: 'Goods Shed' });
@@ -238,10 +318,74 @@ app.post('/api/auth/login', async (req, res, next) => {
       [username]
     );
     const user = result.rows[0];
+    const source = clientSource(req);
     if (!user || !(await bcrypt.compare(password, user.password_hash))) {
+      await writeAudit({
+        userName: username || 'Unknown',
+        userRole: 'unknown',
+        source,
+        action: 'Failed sign-in',
+        detail: username ? `Username ${username}` : '',
+      });
       return res.status(401).json({ error: 'Wrong username or password.' });
     }
+    await writeAudit({
+      userId: user.id,
+      userName: user.name,
+      userRole: user.role,
+      source,
+      action: 'Signed in',
+      detail: `Username ${user.username}`,
+    });
     res.json({ token: signUser(user), user: publicUser(user) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/auth/logout', requireAuth, (_req, res) => {
+  res.json({ ok: true });
+});
+
+app.post('/api/auth/password', requireAuth, async (req, res, next) => {
+  try {
+    const currentPassword = String(req.body.currentPassword || '');
+    const newPassword = String(req.body.newPassword || '');
+    if (newPassword.length < 6) {
+      return res.status(400).json({ error: 'The new password needs at least 6 characters.' });
+    }
+    const result = await pool.query('SELECT password_hash FROM users WHERE id = $1', [req.user.id]);
+    if (!result.rowCount) return res.status(401).json({ error: 'Login required.' });
+    if (!(await bcrypt.compare(currentPassword, result.rows[0].password_hash))) {
+      return res.status(400).json({ error: 'The current password is wrong.' });
+    }
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+    await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [passwordHash, req.user.id]);
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/audit-logs', requireAuth, requireOwner, async (_req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT id, user_name, user_role, source, action, detail, created_at
+       FROM audit_logs
+       ORDER BY created_at DESC
+       LIMIT 400`
+    );
+    res.json({
+      logs: result.rows.map((row) => ({
+        id: row.id,
+        name: row.user_name,
+        role: row.user_role,
+        source: row.source,
+        action: row.action,
+        detail: row.detail || '',
+        at: row.created_at,
+      })),
+    });
   } catch (error) {
     next(error);
   }
@@ -337,7 +481,7 @@ app.delete('/api/users/:id', requireAuth, requireOwner, async (req, res, next) =
     if (id === req.user.id) return res.status(400).json({ error: 'You cannot remove your own login.' });
     const user = await pool.query('SELECT id, role FROM users WHERE id = $1', [id]);
     if (!user.rowCount) return res.status(404).json({ error: 'User not found.' });
-    if (user.rows[0].role === 'owner') return res.status(400).json({ error: 'The owner login cannot be removed.' });
+    if (user.rows[0].role === 'owner') return res.status(400).json({ error: 'The admin login cannot be removed.' });
     const receipts = await pool.query('SELECT id FROM receipts WHERE uploaded_by = $1 LIMIT 1', [id]);
     if (receipts.rowCount) {
       return res.status(400).json({ error: 'This manager has uploaded receipts and cannot be removed.' });
@@ -389,6 +533,14 @@ async function closeReport(id, mark) {
     [id]
   );
   const bagsTaken = trucks.rows.reduce((sum, item) => sum + Number(item.bags || 0), 0);
+  const missing = await pool.query(
+    `SELECT t.sno, t.truck_no
+     FROM trucks t
+     LEFT JOIN loads l ON l.truck_id = t.id
+     WHERE t.receipt_id = $1 AND l.id IS NULL
+     ORDER BY t.sno`,
+    [id]
+  );
   return {
     id: row.id,
     rrNo: row.rr_no,
@@ -402,6 +554,7 @@ async function closeReport(id, mark) {
     closed: mark || Boolean(row.closed_at),
     totalBagsTaken: bagsTaken,
     trucksTaken: trucks.rowCount,
+    missingLoads: missing.rows.map((item) => ({ sno: item.sno, truckNo: item.truck_no })),
     trucks: trucks.rows.map((item) => ({
       sno: item.sno,
       truckNo: item.truck_no,
@@ -432,13 +585,30 @@ app.post('/api/receipts/:id/close', requireAuth, async (req, res, next) => {
   }
 });
 
-app.post('/api/receipts/:id/open', requireAuth, async (req, res, next) => {
+app.post('/api/receipts/:id/start', requireAuth, requireOwner, async (req, res, next) => {
+  try {
+    const existing = await pool.query('SELECT id, status, started_at, closed_at FROM receipts WHERE id = $1', [req.params.id]);
+    if (!existing.rowCount) return res.status(404).json({ error: 'Receipt not found.' });
+    const row = existing.rows[0];
+    if (row.status !== 'submitted') return res.status(400).json({ error: 'Save the RR before starting it.' });
+    if (row.closed_at) return res.status(400).json({ error: 'This RR is closed.' });
+    if (!row.started_at) {
+      const active = await pool.query(`SELECT COUNT(*)::int AS count FROM receipts WHERE status = 'submitted' AND started_at IS NOT NULL AND closed_at IS NULL`);
+      if (active.rows[0].count >= 2) return res.status(400).json({ error: 'Two RRs are already active. Close one before starting another.' });
+      await pool.query('UPDATE receipts SET started_at = NOW() WHERE id = $1', [req.params.id]);
+    }
+    const result = await pool.query(`${receiptSelect} WHERE r.id = $1`, [req.params.id]);
+    res.json({ receipt: mapReceipt(result.rows[0]) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/receipts/:id/open', requireAuth, requireOwner, async (req, res, next) => {
   try {
     const existing = await pool.query('SELECT id, status FROM receipts WHERE id = $1', [req.params.id]);
     if (!existing.rowCount) return res.status(404).json({ error: 'Receipt not found.' });
     if (existing.rows[0].status !== 'submitted') return res.status(400).json({ error: 'Submit the receipt before opening it.' });
-    const other = await pool.query(`SELECT rr_no FROM receipts WHERE status = 'submitted' AND closed_at IS NULL AND id <> $1 LIMIT 1`, [req.params.id]);
-    if (other.rowCount) return res.status(400).json({ error: `Close RR ${other.rows[0].rr_no} before opening this RR.` });
     await pool.query('UPDATE receipts SET closed_at = NULL WHERE id = $1', [req.params.id]);
     const result = await pool.query(`${receiptSelect} WHERE r.id = $1`, [req.params.id]);
     res.json({ receipt: mapReceipt(result.rows[0]) });
@@ -475,8 +645,6 @@ app.get('/api/receipts/:id/file', requireAuth, async (req, res, next) => {
 
 app.post('/api/receipts/upload', requireAuth, upload.single('file'), async (req, res, next) => {
   try {
-    const openRr = await pool.query(`SELECT rr_no FROM receipts WHERE status = 'submitted' AND closed_at IS NULL LIMIT 1`);
-    if (openRr.rowCount) return res.status(400).json({ error: `Close RR ${openRr.rows[0].rr_no} before uploading the next RR.` });
     if (!req.file) return res.status(400).json({ error: 'Choose a PDF to upload.' });
     if (!req.file.buffer.subarray(0, 5).toString().includes('%PDF')) {
       return res.status(400).json({ error: 'That file is not a valid PDF.' });
@@ -484,13 +652,28 @@ app.post('/api/receipts/upload', requireAuth, upload.single('file'), async (req,
 
     const fileHash = crypto.createHash('sha256').update(req.file.buffer).digest('hex');
     const parsed = await parseEtRr(req.file.buffer);
+    const duplicate = await findDuplicate(fileHash, parsed.rrNo) || await findPreviousUpload(fileHash, parsed.rrNo);
+    if (duplicate) return res.status(409).json({ error: duplicateMessage(duplicate), duplicate });
     const pendingId = crypto.randomUUID();
+    const originalName = req.file.originalname || `${parsed.rrNo}.pdf`;
+    const day = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+    const dir = path.join(storageRoot, day);
+    fs.mkdirSync(dir, { recursive: true });
+    const relative = `${day}/upload-${pendingId}.pdf`;
+    fs.writeFileSync(path.join(dir, `upload-${pendingId}.pdf`), req.file.buffer);
+    const stored = await pool.query(
+      `INSERT INTO uploaded_pdfs (file_name, file_path, file_hash, rr_no, uploaded_by)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id`,
+      [originalName, relative, fileHash, parsed.rrNo, req.user.id]
+    );
     fs.writeFileSync(path.join(pendingRoot, `${pendingId}.pdf`), req.file.buffer);
     fs.writeFileSync(path.join(pendingRoot, `${pendingId}.json`), JSON.stringify({
       userId: req.user.id,
       hash: fileHash,
-      originalName: req.file.originalname || `${parsed.rrNo}.pdf`,
+      originalName,
       parsed,
+      uploadedPdfId: stored.rows[0].id,
     }));
     res.status(201).json({
       receipt: {
@@ -520,7 +703,7 @@ app.post('/api/receipts/submit', requireAuth, async (req, res, next) => {
     const pending = readPending(req.body.pendingId, req.user.id);
     if (!pending) return res.status(400).json({ error: 'Upload the PDF again, then enter the set no.' });
 
-    const partyName = String(req.body.partyName || '').trim();
+    const partyName = await savedPartyName(req.body.partyName);
     const sheds = Array.isArray(req.body.sheds) ? req.body.sheds : [];
     if (!partyName) return res.status(400).json({ error: 'Enter the party name.' });
     const shedBySno = new Map(sheds.map((item) => [Number(item.sno ?? item.id), String(item.shedNo || '').trim()]));
@@ -583,6 +766,9 @@ app.post('/api/receipts/submit', requireAuth, async (req, res, next) => {
          ON CONFLICT (file_hash) DO UPDATE SET receipt_id = COALESCE(rr_masters.receipt_id, EXCLUDED.receipt_id)`,
         [pending.meta.originalName, relative, pending.meta.hash, parsed.rrNo, req.user.id, receiptId]
       );
+      if (pending.meta.uploadedPdfId) {
+        await client.query('UPDATE uploaded_pdfs SET receipt_id = $1 WHERE id = $2', [receiptId, pending.meta.uploadedPdfId]);
+      }
       await client.query('COMMIT');
       fs.rmSync(pending.metaPath, { force: true });
       const saved = await pool.query(`${receiptSelect} WHERE r.id = $1`, [receiptId]);
@@ -608,11 +794,7 @@ app.post('/api/receipts/:id/submit', requireAuth, async (req, res, next) => {
     const existing = await pool.query('SELECT id, uploaded_by, status FROM receipts WHERE id = $1', [req.params.id]);
     if (!existing.rowCount) return res.status(404).json({ error: 'Receipt not found.' });
     const receipt = existing.rows[0];
-    if (req.user.role !== 'owner' && receipt.uploaded_by !== req.user.id) {
-      return res.status(403).json({ error: 'Only the person who uploaded this PDF, or the owner, can save it.' });
-    }
-
-    const partyName = String(req.body.partyName || '').trim();
+    const partyName = await savedPartyName(req.body.partyName);
     const sheds = Array.isArray(req.body.sheds) ? req.body.sheds : [];
     if (!partyName) return res.status(400).json({ error: 'Enter the party name.' });
 
@@ -647,6 +829,44 @@ app.post('/api/receipts/:id/submit', requireAuth, async (req, res, next) => {
 
     const saved = await pool.query(`${receiptSelect} WHERE r.id = $1`, [receipt.id]);
     res.json({ receipt: mapReceipt(saved.rows[0], await wagonsFor(receipt.id), await setsFor(receipt.id)) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/uploaded-pdfs', requireAuth, async (_req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT p.id, p.file_name, p.rr_no, p.uploaded_at, p.receipt_id, u.name AS uploader_name
+       FROM uploaded_pdfs p
+       JOIN users u ON u.id = p.uploaded_by
+       ORDER BY p.uploaded_at DESC`
+    );
+    res.json({
+      pdfs: result.rows.map((row) => ({
+        id: row.id,
+        fileName: row.file_name,
+        rrNo: row.rr_no || '',
+        uploadedAt: row.uploaded_at,
+        receiptId: row.receipt_id,
+        uploadedBy: row.uploader_name,
+      })),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/uploaded-pdfs/:id/file', requireAuth, async (req, res, next) => {
+  try {
+    const result = await pool.query('SELECT file_name, file_path FROM uploaded_pdfs WHERE id = $1', [req.params.id]);
+    if (!result.rowCount) return res.status(404).json({ error: 'Uploaded PDF was not found.' });
+    const full = safeResolve(result.rows[0].file_path);
+    if (!full || !fs.existsSync(full)) return res.status(404).json({ error: 'Stored PDF was not found.' });
+    const disposition = req.query.download === '1' ? 'attachment' : 'inline';
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `${disposition}; filename="${result.rows[0].file_name.replace(/"/g, '')}"`);
+    fs.createReadStream(full).pipe(res);
   } catch (error) {
     next(error);
   }
@@ -758,6 +978,7 @@ function mapSource(row) {
     commodity: row.commodity_description || '',
     partyName: row.party_name || '',
     deliveryTo: row.station_to || '',
+    closed: Boolean(row.closed_at),
   };
 }
 
@@ -798,8 +1019,8 @@ app.get('/api/trucks', requireAuth, async (_req, res, next) => {
       `SELECT id, rr_no, to_char(rr_date, 'DD-MM-YYYY') AS rr_date, fnr,
               station_from, station_to, commodity_description, party_name
        FROM receipts
-       WHERE status = 'submitted' AND closed_at IS NULL
-       ORDER BY submitted_at DESC NULLS LAST, id DESC`
+       WHERE status = 'submitted' AND started_at IS NOT NULL AND closed_at IS NULL
+       ORDER BY started_at DESC NULLS LAST, id DESC`
     );
     const trucks = await pool.query(`${truckSelect} ORDER BY t.sno DESC`);
     const partyRows = await pool.query(
@@ -818,9 +1039,15 @@ app.get('/api/trucks', requireAuth, async (_req, res, next) => {
       }
       if (row.unit_id) party.units.push({ id: row.unit_id, name: row.unit_name });
     }
-    const next = await pool.query('SELECT COALESCE(MAX(sno), 0) + 1 AS next_sno FROM trucks');
+    const next = await pool.query(
+      `SELECT r.id, COALESCE(MAX(t.sno), 0) + 1 AS next_sno
+       FROM receipts r
+       LEFT JOIN trucks t ON t.receipt_id = r.id
+       WHERE r.status = 'submitted' AND r.started_at IS NOT NULL AND r.closed_at IS NULL
+       GROUP BY r.id`
+    );
     res.json({
-      nextSno: next.rows[0].next_sno,
+      nextByReceipt: Object.fromEntries(next.rows.map((row) => [row.id, row.next_sno])),
       date: todayInIndia().display,
       sources: sources.rows.map(mapSource),
       parties,
@@ -839,10 +1066,10 @@ app.post('/api/trucks', requireAuth, async (req, res, next) => {
     const unitId = Number(req.body.unitId);
     if (!truckNo) return res.status(400).json({ error: 'Enter the truck number.' });
     const source = await pool.query(
-      `SELECT id FROM receipts WHERE id = $1 AND status = 'submitted' AND closed_at IS NULL`,
+      `SELECT id FROM receipts WHERE id = $1 AND status = 'submitted' AND started_at IS NOT NULL AND closed_at IS NULL`,
       [receiptId]
     );
-    if (!source.rowCount) return res.status(400).json({ error: 'Upload an RR that is not closed before saving a truck entry.' });
+    if (!source.rowCount) return res.status(400).json({ error: 'The admin has to start this RR before truck entry.' });
     const unit = await pool.query(
       `SELECT id FROM party_units WHERE id = $1 AND party_id = $2 AND status = 'ACTIVE'`,
       [unitId, partyId]
@@ -852,7 +1079,7 @@ app.post('/api/trucks', requireAuth, async (req, res, next) => {
     const date = todayInIndia().iso;
     const inserted = await pool.query(
       `INSERT INTO trucks (sno, truck_date, truck_no, receipt_id, party_id, unit_id, created_by)
-       VALUES ((SELECT COALESCE(MAX(sno), 0) + 1 FROM trucks), $1, $2, $3, $4, $5, $6)
+       VALUES ((SELECT COALESCE(MAX(sno), 0) + 1 FROM trucks WHERE receipt_id = $3), $1, $2, $3, $4, $5, $6)
        RETURNING id`,
       [date, truckNo, receiptId, partyId, unitId, req.user.id]
     );
@@ -869,13 +1096,14 @@ const loadSelect = `
          r.station_from, r.station_to, r.commodity_description,
          COALESCE(p.name, '') AS party_name,
          COALESCE(u.name, '') AS delivery_to,
-         r.id AS receipt_id,
-         l.id AS load_id, l.bags, l.set_no
+         r.id AS receipt_id, r.closed_at,
+         l.id AS load_id, l.bags, l.set_no, l.wagon_id, w.wagon_no
   FROM trucks t
   JOIN receipts r ON r.id = t.receipt_id
   LEFT JOIN parties p ON p.id = t.party_id
   LEFT JOIN party_units u ON u.id = t.unit_id
   LEFT JOIN loads l ON l.truck_id = t.id
+  LEFT JOIN wagons w ON w.id = l.wagon_id
 `;
 
 function mapLoad(row, sets = []) {
@@ -883,12 +1111,19 @@ function mapLoad(row, sets = []) {
   return {
     ...truck,
     receiptId: row.receipt_id,
+    closed: Boolean(row.closed_at),
     sets,
-    load: row.load_id ? { id: row.load_id, bags: row.bags, setNo: row.set_no } : null,
+    load: row.load_id ? {
+      id: row.load_id,
+      bags: row.bags,
+      setNo: row.set_no,
+      wagonId: row.wagon_id,
+      wagonNo: row.wagon_no || '',
+    } : null,
   };
 }
 
-app.get('/api/reports', requireAuth, async (_req, res, next) => {
+app.get('/api/reports', requireAuth, requireOwner, async (_req, res, next) => {
   try {
     const result = await pool.query(
       `SELECT t.sno, t.truck_no, t.truck_date::text AS truck_date,
@@ -896,12 +1131,13 @@ app.get('/api/reports', requireAuth, async (_req, res, next) => {
               r.station_from, r.station_to, r.commodity_description,
               COALESCE(p.name, '') AS party_name,
               COALESCE(u.name, '') AS delivery_to,
-              l.bags, l.set_no
+              l.bags, l.set_no, l.wagon_id, w.wagon_no
        FROM loads l
        JOIN trucks t ON t.id = l.truck_id
        JOIN receipts r ON r.id = t.receipt_id
        LEFT JOIN parties p ON p.id = t.party_id
        LEFT JOIN party_units u ON u.id = t.unit_id
+       LEFT JOIN wagons w ON w.id = l.wagon_id
        ORDER BY t.truck_date DESC, t.sno`
     );
     const sets = await setsByReceipt(result.rows.map((row) => row.receipt_id));
@@ -909,6 +1145,7 @@ app.get('/api/reports', requireAuth, async (_req, res, next) => {
       rows: result.rows.map((row) => {
         const [year, month, day] = String(row.truck_date).slice(0, 10).split('-');
         const selected = (sets.get(row.receipt_id) || []).find((set) => String(set.setNo) === String(row.set_no));
+        const wagon = (selected?.wagons || []).find((item) => item.id === row.wagon_id) || null;
         return {
           sno: row.sno,
           truckNo: row.truck_no,
@@ -923,8 +1160,9 @@ app.get('/api/reports', requireAuth, async (_req, res, next) => {
           deliveryTo: row.delivery_to || '',
           bags: row.bags,
           setNo: row.set_no,
-          totalBags: selected?.totalBags ?? '',
-          balanceBags: selected?.balanceBags ?? '',
+          wagonNo: row.wagon_no || wagon?.wagonNo || '',
+          totalBags: wagon?.articleCount ?? selected?.totalBags ?? '',
+          balanceBags: wagon?.balanceBags ?? selected?.balanceBags ?? '',
         };
       }),
     });
@@ -935,51 +1173,161 @@ app.get('/api/reports', requireAuth, async (_req, res, next) => {
 
 app.get('/api/loads', requireAuth, async (_req, res, next) => {
   try {
-    const result = await pool.query(`${loadSelect} WHERE r.closed_at IS NULL ORDER BY t.sno`);
+    const result = await pool.query(
+      `${loadSelect}
+       WHERE r.status = 'submitted' AND r.started_at IS NOT NULL AND r.closed_at IS NULL
+       ORDER BY t.sno`
+    );
+    const sources = await pool.query(
+      `SELECT id, rr_no, to_char(rr_date, 'DD-MM-YYYY') AS rr_date, fnr,
+              station_from, station_to, commodity_description, party_name
+       FROM receipts
+       WHERE status = 'submitted' AND started_at IS NOT NULL AND closed_at IS NULL
+       ORDER BY started_at DESC NULLS LAST, id DESC`
+    );
+    const closed = await pool.query(
+      `SELECT id, rr_no, to_char(rr_date, 'DD-MM-YYYY') AS rr_date,
+              station_from, station_to, party_name
+       FROM receipts
+       WHERE status = 'submitted' AND closed_at IS NOT NULL
+       ORDER BY closed_at DESC, id DESC`
+    );
     const sets = await setsByReceipt(result.rows.map((row) => row.receipt_id));
-    res.json({ trucks: result.rows.map((row) => mapLoad(row, sets.get(row.receipt_id) || [])) });
+    res.json({
+      sources: sources.rows.map(mapSource),
+      trucks: result.rows.map((row) => mapLoad(row, sets.get(row.receipt_id) || [])),
+      closed: closed.rows.map((row) => ({
+        id: row.id,
+        rrNo: row.rr_no,
+        rrDate: row.rr_date || '',
+        stationFrom: row.station_from || '',
+        stationTo: row.station_to || '',
+        partyName: row.party_name || '',
+      })),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/loads/closed/:id', requireAuth, async (req, res, next) => {
+  try {
+    const receipt = await pool.query(
+      `SELECT id, rr_no, to_char(rr_date, 'DD-MM-YYYY') AS rr_date, fnr,
+              station_from, station_to, commodity_description, party_name, closed_at
+       FROM receipts
+       WHERE id = $1 AND status = 'submitted'`,
+      [req.params.id]
+    );
+    if (!receipt.rowCount || !receipt.rows[0].closed_at) return res.status(404).json({ error: 'Closed RR not found.' });
+    const row = receipt.rows[0];
+    const sets = await setsFor(row.id);
+    const trucks = await pool.query(
+      `SELECT t.sno, t.truck_no, COALESCE(u.name, '') AS delivery_to,
+              l.bags, l.set_no, w.wagon_no
+       FROM trucks t
+       LEFT JOIN loads l ON l.truck_id = t.id
+       LEFT JOIN wagons w ON w.id = l.wagon_id
+       LEFT JOIN party_units u ON u.id = t.unit_id
+       WHERE t.receipt_id = $1
+       ORDER BY t.sno`,
+      [row.id]
+    );
+    const totalBags = sets.reduce((sum, set) => sum + Number(set.totalBags || 0), 0);
+    const balanceBags = sets.reduce((sum, set) => sum + Number(set.balanceBags || 0), 0);
+    const gone = trucks.rows.filter((item) => item.bags != null);
+    res.json({
+      report: {
+        id: row.id,
+        rrNo: row.rr_no,
+        rrDate: row.rr_date || '',
+        fnr: row.fnr || '',
+        stationFrom: row.station_from || '',
+        stationTo: row.station_to || '',
+        commodity: row.commodity_description || '',
+        partyName: row.party_name || '',
+        trucksGone: gone.length,
+        totalBags,
+        bagsTaken: gone.reduce((sum, item) => sum + Number(item.bags || 0), 0),
+        balanceBags,
+        sets,
+        trucks: trucks.rows.map((item) => ({
+          sno: item.sno,
+          truckNo: item.truck_no,
+          deliveryTo: item.delivery_to || '',
+          bags: item.bags,
+          setNo: item.set_no,
+          wagonNo: item.wagon_no || '',
+          entered: item.bags != null,
+        })),
+      },
+    });
   } catch (error) {
     next(error);
   }
 });
 
 app.post('/api/loads', requireAuth, async (req, res, next) => {
+  const truckId = Number(req.body.truckId);
+  const bags = Number(req.body.bags);
+  const setNo = Number(req.body.setNo);
+  const wagonId = Number(req.body.wagonId);
+  if (!Number.isInteger(bags) || bags < 1) return res.status(400).json({ error: 'Enter the number of bags.' });
+  if (!Number.isInteger(setNo) || setNo < 1 || setNo > 18) return res.status(400).json({ error: 'Choose a set number from 1 to 18.' });
+  if (!Number.isInteger(wagonId) || wagonId < 1) return res.status(400).json({ error: 'Choose the wagon number.' });
+
+  const client = await pool.connect();
   try {
-    const truckId = Number(req.body.truckId);
-    const bags = Number(req.body.bags);
-    const setNo = Number(req.body.setNo);
-    if (!Number.isInteger(bags) || bags < 1) return res.status(400).json({ error: 'Enter the number of bags.' });
-    if (!Number.isInteger(setNo) || setNo < 1 || setNo > 18) return res.status(400).json({ error: 'Choose a set number from 1 to 18.' });
-    const truck = await pool.query('SELECT id, receipt_id FROM trucks WHERE id = $1', [truckId]);
-    if (!truck.rowCount) return res.status(400).json({ error: 'Choose a truck entry.' });
-    const closed = await pool.query('SELECT closed_at FROM receipts WHERE id = $1', [truck.rows[0].receipt_id]);
-    if (closed.rows[0]?.closed_at) return res.status(400).json({ error: 'This RR is closed.' });
-    const stock = await pool.query(
-      `SELECT COALESCE(SUM(w.article_count), 0)::int AS total_bags,
-              COALESCE((
-                SELECT SUM(l.bags)::int
-                FROM loads l
-                JOIN trucks t ON t.id = l.truck_id
-                WHERE t.receipt_id = $1 AND l.set_no::text = $2
-              ), 0)::int AS used_bags
-       FROM wagons w
-       WHERE w.receipt_id = $1 AND w.shed_no = $2`,
-      [truck.rows[0].receipt_id, String(setNo)]
+    await client.query('BEGIN');
+    const truck = await client.query('SELECT id, receipt_id FROM trucks WHERE id = $1', [truckId]);
+    if (!truck.rowCount) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Choose a truck entry.' });
+    }
+    const receiptId = truck.rows[0].receipt_id;
+    const closed = await client.query('SELECT closed_at, started_at FROM receipts WHERE id = $1', [receiptId]);
+    if (closed.rows[0]?.closed_at) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'This RR is closed.' });
+    }
+    if (!closed.rows[0]?.started_at) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'The admin has to start this RR before load entry.' });
+    }
+    const wagon = await client.query(
+      `SELECT id, wagon_no, article_count, shed_no
+       FROM wagons
+       WHERE id = $1 AND receipt_id = $2
+       FOR UPDATE`,
+      [wagonId, receiptId]
     );
-    const totalBags = stock.rows[0]?.total_bags || 0;
-    if (!totalBags) return res.status(400).json({ error: `Set ${setNo} has no bags on this RR.` });
-    const balanceBags = totalBags - stock.rows[0].used_bags;
-    if (bags > balanceBags) return res.status(400).json({ error: `Set ${setNo} has ${balanceBags} bags left.` });
-    const inserted = await pool.query(
-      `INSERT INTO loads (truck_id, bags, set_no, created_by) VALUES ($1, $2, $3, $4) RETURNING id`,
-      [truckId, bags, setNo, req.user.id]
+    if (!wagon.rowCount || String(wagon.rows[0].shed_no) !== String(setNo)) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Choose a wagon from the selected set.' });
+    }
+    const used = await client.query(
+      'SELECT COALESCE(SUM(bags), 0)::int AS used_bags FROM loads WHERE wagon_id = $1',
+      [wagonId]
     );
+    const balanceBags = wagon.rows[0].article_count - used.rows[0].used_bags;
+    if (bags > balanceBags) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: `Wagon ${wagon.rows[0].wagon_no} has ${balanceBags} bags left.` });
+    }
+    const inserted = await client.query(
+      `INSERT INTO loads (truck_id, bags, set_no, wagon_id, created_by) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+      [truckId, bags, setNo, wagonId, req.user.id]
+    );
+    await client.query('COMMIT');
     const saved = await pool.query(`${loadSelect} WHERE t.id = $1`, [truckId]);
-    const sets = await setsFor(truck.rows[0].receipt_id);
+    const sets = await setsFor(receiptId);
     res.status(201).json({ truck: mapLoad(saved.rows[0], sets), loadId: inserted.rows[0].id });
   } catch (error) {
+    await client.query('ROLLBACK');
     if (error.code === '23505') return res.status(409).json({ error: 'This truck already has a load entry.' });
     next(error);
+  } finally {
+    client.release();
   }
 });
 

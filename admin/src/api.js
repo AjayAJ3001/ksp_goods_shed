@@ -21,7 +21,7 @@ export function clearSession() {
 }
 
 export async function api(path, options = {}) {
-  const headers = { ...(options.headers || {}) };
+  const headers = { 'X-Client': 'admin', ...(options.headers || {}) };
   const token = getToken();
   if (token) headers.Authorization = `Bearer ${token}`;
   let body = options.body;

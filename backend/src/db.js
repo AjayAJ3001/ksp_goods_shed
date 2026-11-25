@@ -36,6 +36,17 @@ CREATE TABLE IF NOT EXISTS receipts (
   uploaded_by INTEGER NOT NULL REFERENCES users(id)
 );
 
+CREATE TABLE IF NOT EXISTS uploaded_pdfs (
+  id SERIAL PRIMARY KEY,
+  file_name TEXT NOT NULL,
+  file_path TEXT NOT NULL,
+  file_hash TEXT NOT NULL,
+  rr_no TEXT,
+  uploaded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  uploaded_by INTEGER NOT NULL REFERENCES users(id),
+  receipt_id INTEGER REFERENCES receipts(id) ON DELETE SET NULL
+);
+
 CREATE TABLE IF NOT EXISTS rr_masters (
   id SERIAL PRIMARY KEY,
   file_name TEXT NOT NULL,
@@ -49,7 +60,7 @@ CREATE TABLE IF NOT EXISTS rr_masters (
 
 CREATE TABLE IF NOT EXISTS trucks (
   id SERIAL PRIMARY KEY,
-  sno INTEGER NOT NULL UNIQUE,
+  sno INTEGER NOT NULL,
   truck_date DATE NOT NULL,
   truck_no TEXT NOT NULL,
   receipt_id INTEGER NOT NULL REFERENCES receipts(id),
@@ -101,12 +112,18 @@ CREATE TABLE IF NOT EXISTS wagons (
 
 async function seedUsers() {
   const seeds = [
-    ['Owner', 'admin', 'admin123', 'owner'],
+    ['Admin', 'admin', 'admin123', 'owner'],
     ['Shed Manager', 'manager', 'manager123', 'manager'],
   ];
   for (const [name, username, password, role] of seeds) {
     const existing = await pool.query('SELECT id FROM users WHERE username = $1', [username]);
-    if (existing.rowCount) continue;
+    if (existing.rowCount) {
+      if (username === 'admin') {
+        await pool.query(`UPDATE users SET name = 'Admin' WHERE username = 'admin'`);
+        await pool.query(`UPDATE audit_logs SET user_name = 'Admin' WHERE user_role = 'owner' AND user_name = 'Owner'`);
+      }
+      continue;
+    }
     const passwordHash = await bcrypt.hash(password, 10);
     await pool.query(
       `INSERT INTO users (name, username, password_hash, role) VALUES ($1, $2, $3, $4)`,
@@ -162,14 +179,61 @@ export async function initDb() {
   await pool.query(schema);
   await pool.query('ALTER TABLE receipts ADD COLUMN IF NOT EXISTS shed_no TEXT');
   await pool.query('ALTER TABLE receipts ADD COLUMN IF NOT EXISTS closed_at TIMESTAMPTZ');
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'receipts' AND column_name = 'started_at'
+      ) THEN
+        ALTER TABLE receipts ADD COLUMN started_at TIMESTAMPTZ;
+        UPDATE receipts
+        SET started_at = COALESCE(submitted_at, uploaded_at)
+        WHERE status = 'submitted' AND closed_at IS NULL;
+      END IF;
+    END $$;
+  `);
+  await pool.query('ALTER TABLE trucks DROP CONSTRAINT IF EXISTS trucks_sno_key');
+  await pool.query(`
+    WITH ranked AS (
+      SELECT id, ROW_NUMBER() OVER (PARTITION BY receipt_id ORDER BY id) AS new_sno
+      FROM trucks
+    )
+    UPDATE trucks AS t
+    SET sno = ranked.new_sno
+    FROM ranked
+    WHERE t.id = ranked.id AND t.sno <> ranked.new_sno
+  `);
+  await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS trucks_receipt_sno_key ON trucks (receipt_id, sno)');
   await pool.query('ALTER TABLE trucks ADD COLUMN IF NOT EXISTS party_id INTEGER REFERENCES parties(id)');
   await pool.query('ALTER TABLE trucks ADD COLUMN IF NOT EXISTS unit_id INTEGER REFERENCES party_units(id)');
+  await pool.query('ALTER TABLE loads ADD COLUMN IF NOT EXISTS wagon_id INTEGER REFERENCES wagons(id)');
   await seedParties();
   await pool.query(`
     INSERT INTO rr_masters (file_name, file_path, file_hash, rr_no, uploaded_at, uploaded_by, receipt_id)
     SELECT file_name, file_path, file_hash, rr_no, uploaded_at, uploaded_by, id
     FROM receipts
     ON CONFLICT (file_hash) DO NOTHING
+  `);
+  await pool.query(`
+    INSERT INTO uploaded_pdfs (file_name, file_path, file_hash, rr_no, uploaded_at, uploaded_by, receipt_id)
+    SELECT r.file_name, r.file_path, r.file_hash, r.rr_no, r.uploaded_at, r.uploaded_by, r.id
+    FROM receipts r
+    WHERE NOT EXISTS (
+      SELECT 1 FROM uploaded_pdfs p WHERE p.receipt_id = r.id
+    )
+  `);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS audit_logs (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      user_name TEXT NOT NULL,
+      user_role TEXT NOT NULL,
+      source TEXT NOT NULL,
+      action TEXT NOT NULL,
+      detail TEXT NOT NULL DEFAULT '',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
   `);
   await seedUsers();
 }
