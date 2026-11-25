@@ -1,3 +1,11 @@
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
+
+export function apiUrl(path) {
+  if (!path) return API_BASE_URL;
+  if (/^https?:\/\//i.test(path)) return path;
+  return `${API_BASE_URL}${path.startsWith('/') ? path : `/${path}`}`;
+}
+
 export function getToken() {
   return localStorage.getItem('gs_token') || '';
 }
@@ -29,7 +37,7 @@ export async function api(path, options = {}) {
     headers['Content-Type'] = 'application/json';
     body = JSON.stringify(body);
   }
-  const response = await fetch(path, { ...options, headers, body });
+  const response = await fetch(apiUrl(path), { ...options, headers, body });
   const data = await response.json().catch(() => ({}));
   if (response.status === 401) {
     clearSession();
@@ -57,7 +65,7 @@ export function formatWhen(value) {
 }
 
 export async function openStoredPdf(path) {
-  const response = await fetch(path, {
+  const response = await fetch(apiUrl(path), {
     headers: { Authorization: `Bearer ${getToken()}` },
   });
   if (!response.ok) throw new Error('Could not open the stored PDF.');
@@ -68,7 +76,7 @@ export async function openStoredPdf(path) {
 }
 
 export async function downloadStoredPdf(path, fileName) {
-  const response = await fetch(`${path}?download=1`, {
+  const response = await fetch(`${apiUrl(path)}?download=1`, {
     headers: { Authorization: `Bearer ${getToken()}` },
   });
   if (!response.ok) throw new Error('Could not download the stored PDF.');

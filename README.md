@@ -24,6 +24,7 @@ npm start
 ```powershell
 cd admin
 npm install
+Copy-Item .env.example .env
 npm run dev
 ```
 
