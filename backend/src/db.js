@@ -179,6 +179,8 @@ export async function initDb() {
   await pool.query(schema);
   await pool.query('ALTER TABLE receipts ADD COLUMN IF NOT EXISTS shed_no TEXT');
   await pool.query('ALTER TABLE receipts ADD COLUMN IF NOT EXISTS closed_at TIMESTAMPTZ');
+  await pool.query('ALTER TABLE receipts DROP CONSTRAINT IF EXISTS receipts_rr_no_key');
+  await pool.query('ALTER TABLE receipts DROP CONSTRAINT IF EXISTS receipts_file_hash_key');
   await pool.query(`
     DO $$
     BEGIN
