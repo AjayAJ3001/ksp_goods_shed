@@ -44,7 +44,12 @@ export async function api(path, options = {}) {
     if (!window.location.pathname.startsWith('/login')) window.location.assign('/login');
   }
   if (!response.ok) {
-    const error = new Error(data.error || 'Request failed.');
+    const fallback = response.status === 413
+      ? 'File is too large for the server (HTTP 413).'
+      : response.status >= 502 && response.status <= 504
+        ? `Server timed out or is unavailable (HTTP ${response.status}).`
+        : `Request failed (HTTP ${response.status}).`;
+    const error = new Error(data.error || fallback);
     error.payload = data;
     error.status = response.status;
     throw error;

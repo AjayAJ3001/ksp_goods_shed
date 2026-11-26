@@ -33,23 +33,19 @@ class NodeCanvasFactory {
   }
 }
 
-let workersPromise;
+let workerPromise;
 
-function workers() {
-  if (!workersPromise) {
-    workersPromise = Promise.all([
-      createWorker('eng'),
-      createWorker('eng'),
-    ]).then(async ([text, field]) => {
-      await text.setParameters({ tessedit_pageseg_mode: '6' });
-      await field.setParameters({ tessedit_pageseg_mode: '6' });
-      return { text, field };
+function getWorker() {
+  if (!workerPromise) {
+    workerPromise = createWorker('eng').then(async (worker) => {
+      await worker.setParameters({ tessedit_pageseg_mode: '6' });
+      return worker;
     }).catch((error) => {
-      workersPromise = null;
+      workerPromise = null;
       throw error;
     });
   }
-  return workersPromise;
+  return workerPromise;
 }
 
 function fail(message) {
@@ -206,8 +202,8 @@ function pairWagonNumbers(lines) {
 }
 
 async function readFields(buffer, whitelist) {
-  const { field } = await workers();
-  await field.setParameters({ tessedit_char_whitelist: whitelist });
+  const field = await getWorker();
+  await field.setParameters({ tessedit_pageseg_mode: '6', tessedit_char_whitelist: whitelist });
   const result = await field.recognize(buffer);
   return linesOf(result.data.text);
 }
@@ -218,7 +214,7 @@ async function refineTypes(types, bands, canvas, x, width) {
   types.forEach((type) => counts.set(type, (counts.get(type) || 0) + 1));
   const trusted = new Set([...counts.entries()].filter(([, count]) => count >= 2).map(([type]) => type));
   if (![...counts.values()].some((count) => count === 1)) return types;
-  const { field } = await workers();
+  const field = await getWorker();
   const refined = [...types];
   for (let index = 0; index < types.length; index += 1) {
     if (trusted.has(types[index])) continue;
@@ -231,7 +227,7 @@ async function refineTypes(types, bands, canvas, x, width) {
     const line = linesOf(read.data.text).find((item) => trusted.has(item));
     if (line) refined[index] = line;
   }
-  await field.setParameters({ tessedit_pageseg_mode: '6' });
+  await field.setParameters({ tessedit_pageseg_mode: '6', tessedit_char_whitelist: '' });
   return refined;
 }
 
@@ -241,7 +237,8 @@ async function wagonsFrom(canvas, pixels) {
   const headerLeft = 20;
   const headerTop = table.top - SCALE * 28;
   const headerPng = cropPng(canvas, headerLeft, headerTop, pixels.width - 40, SCALE * 26);
-  const { text } = await workers();
+  const text = await getWorker();
+  await text.setParameters({ tessedit_pageseg_mode: '6', tessedit_char_whitelist: '' });
   const headerRead = await text.recognize(headerPng, {}, { text: true, tsv: true });
   if (!/number/i.test(headerRead.data.text) || !/article/i.test(headerRead.data.text)) return [];
   const words = wordsFromTsv(headerRead.data.tsv, headerLeft, headerTop).sort((a, b) => a.x0 - b.x0);
@@ -341,40 +338,48 @@ async function renderPages(buffer) {
 
 export async function parseOutlinedEtRr(buffer) {
   const pages = await renderPages(buffer);
-  const { text } = await workers();
-  let found = null;
-  for (const canvas of pages) {
-    const png = cropPng(canvas, 16, canvas.height * 0.012, canvas.width - 32, canvas.height * 0.1);
-    const read = await text.recognize(png);
-    if (!PHRASE.test(read.data.text)) continue;
-    const parsed = headerFrom(read.data.text);
-    if (parsed.header && parsed.commodityDescription) {
-      found = parsed;
-      break;
+  try {
+    const text = await getWorker();
+    await text.setParameters({ tessedit_pageseg_mode: '6', tessedit_char_whitelist: '' });
+    let found = null;
+    for (const canvas of pages) {
+      const png = cropPng(canvas, 16, canvas.height * 0.012, canvas.width - 32, canvas.height * 0.1);
+      const read = await text.recognize(png);
+      if (!PHRASE.test(read.data.text)) continue;
+      const parsed = headerFrom(read.data.text);
+      if (parsed.header && parsed.commodityDescription) {
+        found = parsed;
+        break;
+      }
+    }
+    if (!found) return null;
+
+    const wagons = [];
+    for (const canvas of pages) {
+      const pageWagons = await wagonsFrom(canvas, pixelsOf(canvas));
+      wagons.push(...pageWagons);
+    }
+    if (!wagons.length) {
+      throw fail('Could not read wagon rows (S.no, owning railway, type, wagon no, articles) from the eT-RR.');
+    }
+
+    return {
+      rrNo: found.header.rrNo,
+      rrDate: found.header.rrDate,
+      fnr: found.header.fnr,
+      stationFrom: found.header.stationFrom,
+      stationTo: found.header.stationTo,
+      commodityDescription: found.commodityDescription,
+      consignorCode: found.consignorCode,
+      consigneeCode: found.consigneeCode,
+      rrLine: found.header.line,
+      commodityLine: `Commodity Description: ${found.commodityDescription}`,
+      wagons,
+    };
+  } finally {
+    for (const canvas of pages) {
+      canvas.width = 0;
+      canvas.height = 0;
     }
   }
-  if (!found) return null;
-
-  const wagons = [];
-  for (const canvas of pages) {
-    const pageWagons = await wagonsFrom(canvas, pixelsOf(canvas));
-    wagons.push(...pageWagons);
-  }
-  if (!wagons.length) {
-    throw fail('Could not read wagon rows (S.no, owning railway, type, wagon no, articles) from the eT-RR.');
-  }
-
-  return {
-    rrNo: found.header.rrNo,
-    rrDate: found.header.rrDate,
-    fnr: found.header.fnr,
-    stationFrom: found.header.stationFrom,
-    stationTo: found.header.stationTo,
-    commodityDescription: found.commodityDescription,
-    consignorCode: found.consignorCode,
-    consigneeCode: found.consigneeCode,
-    rrLine: found.header.line,
-    commodityLine: `Commodity Description: ${found.commodityDescription}`,
-    wagons,
-  };
 }
