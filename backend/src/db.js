@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE TABLE IF NOT EXISTS receipts (
   id SERIAL PRIMARY KEY,
-  rr_no TEXT NOT NULL UNIQUE,
+  rr_no TEXT NOT NULL,
   rr_date DATE,
   fnr TEXT,
   station_from TEXT,
@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS receipts (
   party_name TEXT,
   file_name TEXT NOT NULL,
   file_path TEXT NOT NULL,
-  file_hash TEXT NOT NULL UNIQUE,
+  file_hash TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'submitted')),
   uploaded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   submitted_at TIMESTAMPTZ,

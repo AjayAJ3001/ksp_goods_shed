@@ -652,8 +652,6 @@ app.post('/api/receipts/upload', requireAuth, upload.single('file'), async (req,
 
     const fileHash = crypto.createHash('sha256').update(req.file.buffer).digest('hex');
     const parsed = await parseEtRr(req.file.buffer);
-    const duplicate = await findDuplicate(fileHash, parsed.rrNo) || await findPreviousUpload(fileHash, parsed.rrNo);
-    if (duplicate) return res.status(409).json({ error: duplicateMessage(duplicate), duplicate });
     const pendingId = crypto.randomUUID();
     const originalName = req.file.originalname || `${parsed.rrNo}.pdf`;
     const day = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
@@ -713,8 +711,7 @@ app.post('/api/receipts/submit', requireAuth, async (req, res, next) => {
 
     const duplicate = await findDuplicate(pending.meta.hash, pending.meta.parsed.rrNo);
     if (duplicate) {
-      removePending(req.body.pendingId);
-      return res.status(409).json({ error: duplicateMessage(duplicate), duplicate });
+      console.log(`Note: RR ${pending.meta.parsed.rrNo} was previously uploaded. Allowing re-upload.`);
     }
 
     const parsed = pending.meta.parsed;
