@@ -78,6 +78,19 @@ export default function Loads() {
     editUnits = list;
   }
 
+  const existingBags = Number(editingTruck?.load?.bags || 0);
+  const existingWagonId = editingTruck?.load?.wagonId;
+  const existingSetNo = Number(editingTruck?.load?.setNo || 0);
+
+  const currentWagon = editWagons.find((w) => w.id === editWagonId);
+  const isSameWagon = currentWagon && existingWagonId && currentWagon.id === existingWagonId;
+  const wagonAvail = currentWagon ? (currentWagon.balanceBags + (isSameWagon ? existingBags : 0)) : 0;
+  const wagonRemaining = currentWagon ? wagonAvail - (Number(editBags) || 0) : null;
+
+  const isSameSet = editSet && existingSetNo && Number(editSet.setNo) === existingSetNo;
+  const setAvail = editSet ? ((Number(editSet.balanceBags) || 0) + (isSameSet ? existingBags : 0)) : 0;
+  const setRemaining = editSet ? setAvail - (Number(editBags) || 0) : null;
+
   async function handleSaveEdit(e) {
     e.preventDefault();
     const count = Number(editBags);
@@ -97,15 +110,13 @@ export default function Loads() {
       setEditError('Choose a wagon.');
       return;
     }
-    const currentWagon = editWagons.find((w) => w.id === editWagonId);
-    if (currentWagon) {
-      const avail = currentWagon.id === editingTruck.load?.wagonId
-        ? currentWagon.balanceBags + Number(editingTruck.load?.bags || 0)
-        : currentWagon.balanceBags;
-      if (count > avail) {
-        setEditError(`Wagon ${currentWagon.wagonNo} has ${avail} bags left.`);
-        return;
-      }
+    if (currentWagon && count > wagonAvail) {
+      setEditError(`Wagon ${currentWagon.wagonNo} has ${wagonAvail} bags available.`);
+      return;
+    }
+    if (editSet && count > setAvail) {
+      setEditError(`Set ${editSet.setNo} has ${setAvail} bags available.`);
+      return;
     }
     setEditBusy(true);
     setEditError('');
@@ -146,6 +157,9 @@ export default function Loads() {
 
   const totalBagsTaken = trucks.reduce((sum, t) => sum + (Number(t.load?.bags) || 0), 0);
   const loadedTrucksCount = trucks.filter((t) => t.load?.bags != null).length;
+  const openedSets = trucks[0]?.sets || [];
+  const totalReceiptBags = openedSets.reduce((sum, s) => sum + (Number(s.totalBags) || 0), 0);
+  const balanceReceiptBags = totalReceiptBags > 0 ? totalReceiptBags - totalBagsTaken : null;
 
   return (
     <div>
@@ -155,6 +169,7 @@ export default function Loads() {
           <h1>Load entry</h1>
           <p>
             <strong>{loadedTrucksCount}</strong> of <strong>{trucks.length}</strong> trucks loaded · Total bags taken: <strong>{totalBagsTaken}</strong>
+            {balanceReceiptBags != null ? <> · Balance bags: <strong>{balanceReceiptBags}</strong></> : null}
           </p>
         </div>
       </div>
@@ -279,11 +294,14 @@ export default function Loads() {
                   required
                 >
                   <option value="">Choose Set</option>
-                  {editChoices.map((s) => (
-                    <option key={s.setNo} value={s.setNo}>
-                      Set {s.setNo} {s.balanceBags != null ? `(Balance: ${s.balanceBags})` : ''}
-                    </option>
-                  ))}
+                  {editChoices.map((s) => {
+                    const sAvail = Number(s.balanceBags || 0) + (Number(s.setNo) === existingSetNo ? existingBags : 0);
+                    return (
+                      <option key={s.setNo} value={s.setNo}>
+                        Set {s.setNo} ({sAvail} bags available)
+                      </option>
+                    );
+                  })}
                 </select>
               </div>
               <div>
@@ -297,8 +315,8 @@ export default function Loads() {
                 >
                   <option value="">Choose Wagon</option>
                   {editWagons.map((w) => {
-                    const avail = w.id === editingTruck.load?.wagonId
-                      ? w.balanceBags + Number(editingTruck.load?.bags || 0)
+                    const avail = w.id === existingWagonId
+                      ? w.balanceBags + existingBags
                       : w.balanceBags;
                     return (
                       <option key={w.id} value={w.id}>
@@ -308,6 +326,26 @@ export default function Loads() {
                   })}
                 </select>
               </div>
+              {currentWagon && (
+                <div style={{ padding: '10px 12px', background: '#f0fdf4', borderRadius: '8px', border: '1px solid #bbf7d0', fontSize: '13px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span style={{ fontWeight: 600, color: '#166534' }}>Wagon ({currentWagon.wagonNo}):</span>
+                    <span>Total: {currentWagon.articleCount} · Available: <strong>{wagonAvail}</strong></span>
+                  </div>
+                  {editSet && (
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <span style={{ fontWeight: 600, color: '#166534' }}>Set {editSet.setNo}:</span>
+                      <span>Total: {editSet.totalBags || '—'} · Available: <strong>{setAvail}</strong></span>
+                    </div>
+                  )}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '4px', paddingTop: '4px', borderTop: '1px solid #bbf7d0', fontWeight: 700 }}>
+                    <span style={{ color: '#166534' }}>After this load:</span>
+                    <span style={{ color: (wagonRemaining ?? 0) < 0 ? '#dc2626' : '#15803d' }}>
+                      Wagon bal: {wagonRemaining != null ? wagonRemaining : '—'} · Set bal: {setRemaining != null ? setRemaining : '—'}
+                    </span>
+                  </div>
+                </div>
+              )}
               <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end', marginTop: '12px' }}>
                 <button type="button" className="button button-subtle" onClick={closeEdit} disabled={editBusy}>
                   Cancel
