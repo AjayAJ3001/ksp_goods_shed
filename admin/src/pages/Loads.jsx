@@ -62,7 +62,21 @@ export default function Loads() {
   const editSet = editChoices.find((s) => Number(s.setNo) === Number(editSetNo));
   const editWagons = editSet?.wagons || [];
   const partyForTruck = parties.find((p) => p.id === editingTruck?.partyId || p.name === editingTruck?.partyName);
-  const editUnits = editingTruck?.partyUnits?.length ? editingTruck.partyUnits : (partyForTruck?.units || []);
+  let editUnits = editingTruck?.partyUnits?.length ? editingTruck.partyUnits : (partyForTruck?.units || []);
+  if (!editUnits.length) {
+    const seen = new Set();
+    const list = [];
+    for (const p of parties) {
+      for (const u of (p.units || [])) {
+        const key = u.name.trim().toLowerCase();
+        if (!seen.has(key)) {
+          seen.add(key);
+          list.push(u);
+        }
+      }
+    }
+    editUnits = list;
+  }
 
   async function handleSaveEdit(e) {
     e.preventDefault();
@@ -95,6 +109,7 @@ export default function Loads() {
     }
     setEditBusy(true);
     setEditError('');
+    const resolvedUnit = editUnits.find((u) => u.id === editUnitId);
     try {
       await api(`/api/loads/${editingTruck.id}`, {
         method: 'PUT',
@@ -102,6 +117,7 @@ export default function Loads() {
           truckId: editingTruck.id,
           truckNo: editTruckNo.trim().toUpperCase(),
           unitId: editUnitId,
+          deliveryTo: resolvedUnit?.name || editingTruck.deliveryTo,
           bags: count,
           setNo: editSetNo,
           wagonId: editWagonId,

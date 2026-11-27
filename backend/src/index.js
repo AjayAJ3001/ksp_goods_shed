@@ -1409,16 +1409,24 @@ app.put('/api/loads/:truckId', requireAuth, async (req, res, next) => {
 
     // Validate and update delivery unit if provided
     if (unitId) {
-      const partyId = truck.rows[0].party_id;
       const unitCheck = await client.query(
-        'SELECT id FROM party_units WHERE id = $1 AND party_id = $2',
-        [unitId, partyId]
+        'SELECT id, party_id, name FROM party_units WHERE id = $1',
+        [unitId]
       );
       if (!unitCheck.rowCount) {
         await client.query('ROLLBACK');
-        return res.status(400).json({ error: 'Choose a valid delivery unit for this party.' });
+        return res.status(400).json({ error: 'Delivery unit not found.' });
       }
-      await client.query('UPDATE trucks SET unit_id = $1 WHERE id = $2', [unitId, truckId]);
+      await client.query('UPDATE trucks SET unit_id = $1, party_id = COALESCE(trucks.party_id, $2) WHERE id = $3', [unitId, unitCheck.rows[0].party_id, truckId]);
+    } else if (req.body.deliveryTo) {
+      const unitName = String(req.body.deliveryTo).trim();
+      const unitCheck = await client.query(
+        'SELECT id, party_id FROM party_units WHERE UPPER(TRIM(name)) = UPPER(TRIM($1)) LIMIT 1',
+        [unitName]
+      );
+      if (unitCheck.rowCount) {
+        await client.query('UPDATE trucks SET unit_id = $1, party_id = COALESCE(trucks.party_id, $2) WHERE id = $3', [unitCheck.rows[0].id, unitCheck.rows[0].party_id, truckId]);
+      }
     }
 
     // Update truck number if provided
