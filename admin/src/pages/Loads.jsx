@@ -82,14 +82,12 @@ export default function Loads() {
   const existingWagonId = editingTruck?.load?.wagonId;
   const existingSetNo = Number(editingTruck?.load?.setNo || 0);
 
-  const currentWagon = editWagons.find((w) => w.id === editWagonId);
-  const isSameWagon = currentWagon && existingWagonId && currentWagon.id === existingWagonId;
-  const wagonAvail = currentWagon ? (currentWagon.balanceBags + (isSameWagon ? existingBags : 0)) : 0;
-  const wagonRemaining = currentWagon ? wagonAvail - (Number(editBags) || 0) : null;
+  const currentWagon = editWagons.find((w) => Number(w.id) === Number(editWagonId));
+  const wagonTotal = Number(currentWagon?.articleCount || 0);
+  const wagonRemaining = wagonTotal > 0 ? (wagonTotal - (Number(editBags) || 0)) : null;
 
-  const isSameSet = editSet && existingSetNo && Number(editSet.setNo) === existingSetNo;
-  const setAvail = editSet ? ((Number(editSet.balanceBags) || 0) + (isSameSet ? existingBags : 0)) : 0;
-  const setRemaining = editSet ? setAvail - (Number(editBags) || 0) : null;
+  const setTotal = Number(editSet?.totalBags || wagonTotal);
+  const setRemaining = setTotal > 0 ? (setTotal - (Number(editBags) || 0)) : null;
 
   async function handleSaveEdit(e) {
     e.preventDefault();
@@ -110,12 +108,8 @@ export default function Loads() {
       setEditError('Choose a wagon.');
       return;
     }
-    if (currentWagon && count > wagonAvail) {
-      setEditError(`Wagon ${currentWagon.wagonNo} has ${wagonAvail} bags available.`);
-      return;
-    }
-    if (editSet && count > setAvail) {
-      setEditError(`Set ${editSet.setNo} has ${setAvail} bags available.`);
+    if (wagonTotal > 0 && count > wagonTotal) {
+      setEditError(`Wagon ${currentWagon.wagonNo} only has ${wagonTotal} total bags.`);
       return;
     }
     setEditBusy(true);
@@ -330,12 +324,12 @@ export default function Loads() {
                 <div style={{ padding: '10px 12px', background: '#f0fdf4', borderRadius: '8px', border: '1px solid #bbf7d0', fontSize: '13px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                     <span style={{ fontWeight: 600, color: '#166534' }}>Wagon ({currentWagon.wagonNo}):</span>
-                    <span>Total: {currentWagon.articleCount} · Available: <strong>{wagonAvail}</strong></span>
+                    <span>Total: <strong>{wagonTotal}</strong> bags</span>
                   </div>
                   {editSet && (
                     <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                       <span style={{ fontWeight: 600, color: '#166534' }}>Set {editSet.setNo}:</span>
-                      <span>Total: {editSet.totalBags || '—'} · Available: <strong>{setAvail}</strong></span>
+                      <span>Total: <strong>{setTotal || '—'}</strong> bags</span>
                     </div>
                   )}
                   <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '4px', paddingTop: '4px', borderTop: '1px solid #bbf7d0', fontWeight: 700 }}>

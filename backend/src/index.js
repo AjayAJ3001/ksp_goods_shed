@@ -113,6 +113,7 @@ function mapWagon(row) {
     wagonType: row.wagon_type,
     wagonNo: row.wagon_no,
     articleCount: row.article_count,
+    balanceBags: row.balance_bags !== undefined ? row.balance_bags : row.article_count,
     shedNo: row.shed_no || '',
   };
 }
@@ -181,7 +182,8 @@ async function setsFor(receiptId) {
 async function wagonsFor(receiptId) {
   const result = await pool.query(
     `SELECT w.id, w.sno, w.owning_rly, w.wagon_type, w.wagon_no,
-            GREATEST(w.article_count - COALESCE(SUM(l.bags), 0), 0)::int AS article_count,
+            w.article_count,
+            GREATEST(w.article_count - COALESCE(SUM(l.bags), 0), 0)::int AS balance_bags,
             w.shed_no
      FROM wagons w
      LEFT JOIN loads l ON l.wagon_id = w.id
@@ -1415,9 +1417,9 @@ app.post('/api/loads', requireAuth, async (req, res, next) => {
       [wagonId, truckId]
     );
     const balanceBags = wagon.rows[0].article_count - used.rows[0].used_bags;
-    if (bags > balanceBags) {
+    if (bags > wagon.rows[0].article_count) {
       await client.query('ROLLBACK');
-      return res.status(400).json({ error: `Wagon ${wagon.rows[0].wagon_no} has ${balanceBags} bags left.` });
+      return res.status(400).json({ error: `Wagon ${wagon.rows[0].wagon_no} only has ${wagon.rows[0].article_count} total bags.` });
     }
 
     if (unitId) {
@@ -1524,9 +1526,9 @@ app.put('/api/loads/:truckId', requireAuth, async (req, res, next) => {
       [wagonId, truckId]
     );
     const balanceBags = wagon.rows[0].article_count - used.rows[0].used_bags;
-    if (bags > balanceBags) {
+    if (bags > wagon.rows[0].article_count) {
       await client.query('ROLLBACK');
-      return res.status(400).json({ error: `Wagon ${wagon.rows[0].wagon_no} has ${balanceBags} bags left.` });
+      return res.status(400).json({ error: `Wagon ${wagon.rows[0].wagon_no} only has ${wagon.rows[0].article_count} total bags.` });
     }
 
     // Validate and update delivery unit if provided
