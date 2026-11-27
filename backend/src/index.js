@@ -507,7 +507,59 @@ app.get('/api/receipts', requireAuth, async (req, res, next) => {
         OR u.name ILIKE $1`;
     }
     const result = await pool.query(`${receiptSelect} ${where} ORDER BY r.uploaded_at DESC LIMIT 300`, params);
-    res.json({ receipts: result.rows.map((row) => mapReceipt(row)) });
+    const ids = result.rows.map((row) => row.id);
+    const [sets, vehicles] = ids.length
+      ? await Promise.all([
+        setsByReceipt(ids),
+        pool.query(
+          `SELECT t.receipt_id, t.sno, t.trip, t.truck_no, l.bags, l.set_no,
+                  w.wagon_no, COALESCE(u.name, '') AS delivery_to
+           FROM trucks t
+           JOIN loads l ON l.truck_id = t.id
+           LEFT JOIN wagons w ON w.id = l.wagon_id
+           LEFT JOIN party_units u ON u.id = t.unit_id
+           WHERE t.receipt_id = ANY($1)
+           ORDER BY t.receipt_id, t.sno`,
+          [ids]
+        ),
+      ])
+      : [new Map(), { rows: [] }];
+    const vehiclesById = new Map();
+    for (const row of vehicles.rows) {
+      if (!vehiclesById.has(row.receipt_id)) vehiclesById.set(row.receipt_id, []);
+      vehiclesById.get(row.receipt_id).push({
+        sno: row.sno,
+        trip: Number(row.trip) || 1,
+        truckNo: row.truck_no,
+        bags: Number(row.bags) || 0,
+        setNo: row.set_no,
+        wagonNo: row.wagon_no || '',
+        deliveryTo: row.delivery_to,
+      });
+    }
+    res.json({
+      receipts: result.rows.map((row) => {
+        const taken = vehiclesById.get(row.id) || [];
+        const setList = (sets.get(row.id) || []).map((set) => ({
+          setNo: set.setNo,
+          totalBags: Number(set.totalBags) || 0,
+          bagsTaken: (Number(set.totalBags) || 0) - (Number(set.balanceBags) || 0),
+          balanceBags: Number(set.balanceBags) || 0,
+          vehicleCount: taken.filter((item) => String(item.setNo) === String(set.setNo)).length,
+        }));
+        const totalBags = setList.reduce((sum, set) => sum + set.totalBags, 0);
+        const bagsTaken = taken.reduce((sum, item) => sum + item.bags, 0);
+        return {
+          ...mapReceipt(row),
+          totalBags,
+          bagsTaken,
+          balanceBags: totalBags - bagsTaken,
+          vehicleCount: taken.length,
+          sets: setList,
+          vehicles: taken,
+        };
+      }),
+    });
   } catch (error) {
     next(error);
   }
