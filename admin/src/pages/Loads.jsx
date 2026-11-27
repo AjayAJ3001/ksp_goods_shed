@@ -29,13 +29,14 @@ export default function Loads() {
         <div className="table-wrap">
           <table>
             <thead>
-              <tr><th>S.no</th><th>Truck number</th><th>RR No</th><th>Bags</th><th>Set no</th><th>Wagon no</th><th>Delivery to</th></tr>
+              <tr><th>S.no</th><th>Truck number</th><th>Trip</th><th>RR No</th><th>Bags</th><th>Set no</th><th>Wagon no</th><th>Delivery to</th></tr>
             </thead>
             <tbody>
               {trucks.map((truck) => (
                 <tr key={truck.id}>
                   <td>{truck.sno}</td>
                   <td><strong>{truck.truckNo}</strong></td>
+                  <td>Trip {truck.trip || 1}</td>
                   <td>{truck.rrNo}{truck.closed && !truck.load ? ' · closed' : ''}</td>
                   <td>{truck.load ? truck.load.bags : truck.closed ? 'Not entered' : '—'}</td>
                   <td>{truck.load ? truck.load.setNo : truck.closed ? 'Not entered' : '—'}</td>
@@ -43,7 +44,7 @@ export default function Loads() {
                   <td>{truck.deliveryTo || '—'}</td>
                 </tr>
               ))}
-              {!trucks.length && !error && <tr><td colSpan="7">No open truck entry. Upload an RR and save trucks first.</td></tr>}
+              {!trucks.length && !error && <tr><td colSpan="8">No open truck entry. Upload an RR and save trucks first.</td></tr>}
             </tbody>
           </table>
         </div>

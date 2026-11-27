@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS rr_masters (
 CREATE TABLE IF NOT EXISTS trucks (
   id SERIAL PRIMARY KEY,
   sno INTEGER NOT NULL,
+  trip INTEGER NOT NULL DEFAULT 1,
   truck_date DATE NOT NULL,
   truck_no TEXT NOT NULL,
   receipt_id INTEGER NOT NULL REFERENCES receipts(id),
@@ -207,6 +208,17 @@ export async function initDb() {
     WHERE t.id = ranked.id AND t.sno <> ranked.new_sno
   `);
   await pool.query('CREATE UNIQUE INDEX IF NOT EXISTS trucks_receipt_sno_key ON trucks (receipt_id, sno)');
+  await pool.query('ALTER TABLE trucks ADD COLUMN IF NOT EXISTS trip INTEGER NOT NULL DEFAULT 1');
+  await pool.query(`
+    WITH numbered AS (
+      SELECT id, ROW_NUMBER() OVER (PARTITION BY receipt_id, UPPER(TRIM(truck_no)) ORDER BY sno, id) AS calc_trip
+      FROM trucks
+    )
+    UPDATE trucks t
+    SET trip = n.calc_trip
+    FROM numbered n
+    WHERE t.id = n.id AND (t.trip IS NULL OR (t.trip = 1 AND n.calc_trip > 1));
+  `);
   await pool.query('ALTER TABLE trucks ADD COLUMN IF NOT EXISTS party_id INTEGER REFERENCES parties(id)');
   await pool.query('ALTER TABLE trucks ADD COLUMN IF NOT EXISTS unit_id INTEGER REFERENCES party_units(id)');
   await pool.query('ALTER TABLE loads ADD COLUMN IF NOT EXISTS wagon_id INTEGER REFERENCES wagons(id)');

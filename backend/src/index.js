@@ -524,7 +524,7 @@ async function closeReport(id, mark) {
     await pool.query('UPDATE receipts SET closed_at = COALESCE(closed_at, NOW()) WHERE id = $1', [id]);
   }
   const trucks = await pool.query(
-    `SELECT t.sno, t.truck_no, l.bags, l.set_no, COALESCE(u.name, '') AS delivery_to
+    `SELECT t.sno, t.trip, t.truck_no, l.bags, l.set_no, COALESCE(u.name, '') AS delivery_to
      FROM trucks t
      JOIN loads l ON l.truck_id = t.id
      LEFT JOIN party_units u ON u.id = t.unit_id
@@ -534,7 +534,7 @@ async function closeReport(id, mark) {
   );
   const bagsTaken = trucks.rows.reduce((sum, item) => sum + Number(item.bags || 0), 0);
   const missing = await pool.query(
-    `SELECT t.sno, t.truck_no
+    `SELECT t.sno, t.trip, t.truck_no
      FROM trucks t
      LEFT JOIN loads l ON l.truck_id = t.id
      WHERE t.receipt_id = $1 AND l.id IS NULL
@@ -554,9 +554,10 @@ async function closeReport(id, mark) {
     closed: mark || Boolean(row.closed_at),
     totalBagsTaken: bagsTaken,
     trucksTaken: trucks.rowCount,
-    missingLoads: missing.rows.map((item) => ({ sno: item.sno, truckNo: item.truck_no })),
+    missingLoads: missing.rows.map((item) => ({ sno: item.sno, trip: Number(item.trip) || 1, truckNo: item.truck_no })),
     trucks: trucks.rows.map((item) => ({
       sno: item.sno,
+      trip: Number(item.trip) || 1,
       truckNo: item.truck_no,
       bags: item.bags,
       setNo: item.set_no,
@@ -980,11 +981,12 @@ function mapSource(row) {
 }
 
 const truckSelect = `
-  SELECT t.id, t.sno, t.truck_date::text AS truck_date, t.truck_no,
+  SELECT t.id, t.sno, t.trip, t.truck_date::text AS truck_date, t.truck_no,
          r.rr_no, to_char(r.rr_date, 'DD-MM-YYYY') AS rr_date, r.fnr,
          r.station_from, r.station_to, r.commodity_description,
          COALESCE(p.name, '') AS party_name,
-         COALESCE(u.name, '') AS delivery_to
+         COALESCE(u.name, '') AS delivery_to,
+         t.receipt_id
   FROM trucks t
   JOIN receipts r ON r.id = t.receipt_id
   LEFT JOIN parties p ON p.id = t.party_id
@@ -996,6 +998,8 @@ function mapTruck(row) {
   return {
     id: row.id,
     sno: row.sno,
+    trip: Number(row.trip) || 1,
+    receiptId: row.receipt_id,
     date: day && month && year ? `${day}-${month}-${year}` : row.truck_date,
     truckNo: row.truck_no,
     commodity: row.commodity_description || '',
@@ -1075,8 +1079,12 @@ app.post('/api/trucks', requireAuth, async (req, res, next) => {
 
     const date = todayInIndia().iso;
     const inserted = await pool.query(
-      `INSERT INTO trucks (sno, truck_date, truck_no, receipt_id, party_id, unit_id, created_by)
-       VALUES ((SELECT COALESCE(MAX(sno), 0) + 1 FROM trucks WHERE receipt_id = $3), $1, $2, $3, $4, $5, $6)
+      `INSERT INTO trucks (sno, trip, truck_date, truck_no, receipt_id, party_id, unit_id, created_by)
+       VALUES (
+         (SELECT COALESCE(MAX(sno), 0) + 1 FROM trucks WHERE receipt_id = $3),
+         (SELECT COALESCE(COUNT(*), 0) + 1 FROM trucks WHERE receipt_id = $3 AND UPPER(TRIM(truck_no)) = UPPER(TRIM($2))),
+         $1, $2, $3, $4, $5, $6
+       )
        RETURNING id`,
       [date, truckNo, receiptId, partyId, unitId, req.user.id]
     );
@@ -1088,7 +1096,7 @@ app.post('/api/trucks', requireAuth, async (req, res, next) => {
 });
 
 const loadSelect = `
-  SELECT t.id, t.sno, t.truck_date::text AS truck_date, t.truck_no,
+  SELECT t.id, t.sno, t.trip, t.truck_date::text AS truck_date, t.truck_no,
          r.rr_no, to_char(r.rr_date, 'DD-MM-YYYY') AS rr_date, r.fnr,
          r.station_from, r.station_to, r.commodity_description,
          COALESCE(p.name, '') AS party_name,
@@ -1123,7 +1131,7 @@ function mapLoad(row, sets = []) {
 app.get('/api/reports', requireAuth, requireOwner, async (_req, res, next) => {
   try {
     const result = await pool.query(
-      `SELECT t.sno, t.truck_no, t.truck_date::text AS truck_date,
+      `SELECT t.sno, t.trip, t.truck_no, t.truck_date::text AS truck_date,
               r.id AS receipt_id, r.rr_no, to_char(r.rr_date, 'DD-MM-YYYY') AS rr_date, r.fnr,
               r.station_from, r.station_to, r.commodity_description,
               COALESCE(p.name, '') AS party_name,
@@ -1145,6 +1153,7 @@ app.get('/api/reports', requireAuth, requireOwner, async (_req, res, next) => {
         const wagon = (selected?.wagons || []).find((item) => item.id === row.wagon_id) || null;
         return {
           sno: row.sno,
+          trip: Number(row.trip) || 1,
           truckNo: row.truck_no,
           date: day && month && year ? `${day}-${month}-${year}` : row.truck_date,
           rrNo: row.rr_no,
@@ -1220,7 +1229,7 @@ app.get('/api/loads/closed/:id', requireAuth, async (req, res, next) => {
     const row = receipt.rows[0];
     const sets = await setsFor(row.id);
     const trucks = await pool.query(
-      `SELECT t.sno, t.truck_no, COALESCE(u.name, '') AS delivery_to,
+      `SELECT t.sno, t.trip, t.truck_no, COALESCE(u.name, '') AS delivery_to,
               l.bags, l.set_no, w.wagon_no
        FROM trucks t
        LEFT JOIN loads l ON l.truck_id = t.id
@@ -1250,6 +1259,7 @@ app.get('/api/loads/closed/:id', requireAuth, async (req, res, next) => {
         sets,
         trucks: trucks.rows.map((item) => ({
           sno: item.sno,
+          trip: Number(item.trip) || 1,
           truckNo: item.truck_no,
           deliveryTo: item.delivery_to || '',
           bags: item.bags,

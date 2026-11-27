@@ -27,6 +27,7 @@ export default function Trucks() {
             <tr>
               <th>S.no</th>
               <th>Truck number</th>
+              <th>Trip</th>
               <th>RR No</th>
               <th>Commodity</th>
               <th>Party name</th>
@@ -39,6 +40,7 @@ export default function Trucks() {
               <tr key={truck.id}>
                 <td>{truck.sno}</td>
                 <td><strong>{truck.truckNo}</strong></td>
+                <td>Trip {truck.trip || 1}</td>
                 <td><strong>{truck.rrNo}</strong></td>
                 <td>{truck.commodity}</td>
                 <td>{truck.partyName || '—'}</td>
@@ -46,7 +48,7 @@ export default function Trucks() {
                 <td>{truck.date}</td>
               </tr>
             ))}
-            {!trucks.length && <tr><td colSpan="7">No truck entry yet.</td></tr>}
+            {!trucks.length && <tr><td colSpan="8">No truck entry yet.</td></tr>}
           </tbody>
         </table>
       </section>

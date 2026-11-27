@@ -10,7 +10,7 @@ function closedLoadDocument(report) {
   const rows = (report.trucks || []).map((truck) => `
     <tr>
       <td>${escapeHtml(truck.sno)}</td>
-      <td>${escapeHtml(truck.truckNo)}</td>
+      <td>${escapeHtml(truck.truckNo)}${truck.trip ? ` (Trip ${escapeHtml(truck.trip)})` : ''}</td>
       <td>${escapeHtml(truck.entered ? truck.setNo : 'Not entered')}</td>
       <td>${escapeHtml(truck.entered ? (truck.wagonNo || '—') : 'Not entered')}</td>
       <td>${escapeHtml(truck.entered ? truck.bags : 'Not entered')}</td>
@@ -135,7 +135,7 @@ export default function ClosedLoad() {
               {(report.trucks || []).map((truck) => (
                 <tr key={`${truck.sno}-${truck.truckNo}`}>
                   <td>{truck.sno}</td>
-                  <td><strong>{truck.truckNo}</strong></td>
+                  <td><strong>{truck.truckNo}</strong> (Trip {truck.trip || 1})</td>
                   <td>{truck.entered ? truck.setNo : 'Not entered'}</td>
                   <td>{truck.entered ? (truck.wagonNo || '—') : 'Not entered'}</td>
                   <td>{truck.entered ? truck.bags : 'Not entered'}</td>

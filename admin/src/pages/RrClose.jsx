@@ -11,7 +11,7 @@ function closeDocument(report) {
   const rows = (report.trucks || []).map((truck) => `
     <tr>
       <td>${escapeHtml(truck.sno)}</td>
-      <td>${escapeHtml(truck.truckNo)}</td>
+      <td>${escapeHtml(truck.truckNo)}${truck.trip ? ` (Trip ${escapeHtml(truck.trip)})` : ''}</td>
       <td>${escapeHtml(truck.setNo)}</td>
       <td>${escapeHtml(truck.bags)}</td>
       <td>${escapeHtml(truck.deliveryTo)}</td>
@@ -163,7 +163,7 @@ export default function RrClose() {
             {report.trucks.map((truck) => (
               <tr key={`${truck.sno}-${truck.truckNo}`}>
                 <td>{truck.sno}</td>
-                <td>{truck.truckNo}</td>
+                <td>{truck.truckNo} (Trip {truck.trip || 1})</td>
                 <td>{truck.setNo}</td>
                 <td>{truck.bags}</td>
                 <td>{truck.deliveryTo || '—'}</td>

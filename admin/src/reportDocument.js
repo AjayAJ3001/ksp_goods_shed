@@ -20,6 +20,7 @@ export function reportColumns(item = {}) {
   return [
     ['S.no', item.sno],
     ['Vehicle no', item.truckNo],
+    ['Trip', item.trip ? `Trip ${item.trip}` : 'Trip 1'],
     ['Party name', item.partyName],
     ['RR No', item.rrNo],
     ['RR Date', item.rrDate],
