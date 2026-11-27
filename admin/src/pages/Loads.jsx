@@ -2,6 +2,18 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
 
+function calcTrip(truck, list = []) {
+  if (truck.trip && Number(truck.trip) > 1) return truck.trip;
+  const target = String(truck.truckNo || '').trim().toUpperCase();
+  const same = list.filter((t) => (t.receiptId === truck.receiptId || t.rrNo === truck.rrNo) && String(t.truckNo || '').trim().toUpperCase() === target);
+  if (same.length > 1) {
+    same.sort((a, b) => (Number(a.sno) || 0) - (Number(b.sno) || 0) || (Number(a.id) || 0) - (Number(b.id) || 0));
+    const idx = same.findIndex((t) => (t.id && truck.id && t.id === truck.id) || (t.sno && truck.sno && t.sno === truck.sno));
+    if (idx >= 0) return idx + 1;
+  }
+  return truck.trip || 1;
+}
+
 export default function Loads() {
   const [trucks, setTrucks] = useState([]);
   const [closed, setClosed] = useState([]);
@@ -36,7 +48,7 @@ export default function Loads() {
                 <tr key={truck.id}>
                   <td>{truck.sno}</td>
                   <td><strong>{truck.truckNo}</strong></td>
-                  <td>Trip {truck.trip || 1}</td>
+                  <td>Trip {calcTrip(truck, trucks)}</td>
                   <td>{truck.rrNo}{truck.closed && !truck.load ? ' · closed' : ''}</td>
                   <td>{truck.load ? truck.load.bags : truck.closed ? 'Not entered' : '—'}</td>
                   <td>{truck.load ? truck.load.setNo : truck.closed ? 'Not entered' : '—'}</td>

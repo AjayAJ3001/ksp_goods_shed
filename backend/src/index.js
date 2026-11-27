@@ -1078,15 +1078,16 @@ app.post('/api/trucks', requireAuth, async (req, res, next) => {
     if (!unit.rowCount) return res.status(400).json({ error: 'Choose the party, then choose a delivery unit.' });
 
     const date = todayInIndia().iso;
+    const clientTrip = Number(req.body.trip) || null;
     const inserted = await pool.query(
       `INSERT INTO trucks (sno, trip, truck_date, truck_no, receipt_id, party_id, unit_id, created_by)
        VALUES (
          (SELECT COALESCE(MAX(sno), 0) + 1 FROM trucks WHERE receipt_id = $3),
-         (SELECT COALESCE(COUNT(*), 0) + 1 FROM trucks WHERE receipt_id = $3 AND UPPER(TRIM(truck_no)) = UPPER(TRIM($2))),
+         COALESCE($7, (SELECT COALESCE(COUNT(*), 0) + 1 FROM trucks WHERE receipt_id = $3 AND UPPER(TRIM(truck_no)) = UPPER(TRIM($2)))),
          $1, $2, $3, $4, $5, $6
        )
        RETURNING id`,
-      [date, truckNo, receiptId, partyId, unitId, req.user.id]
+      [date, truckNo, receiptId, partyId, unitId, req.user.id, clientTrip]
     );
     const saved = await pool.query(`${truckSelect} WHERE t.id = $1`, [inserted.rows[0].id]);
     res.status(201).json({ truck: mapTruck(saved.rows[0]) });
