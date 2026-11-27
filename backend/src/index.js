@@ -1103,6 +1103,87 @@ app.post('/api/trucks', requireAuth, async (req, res, next) => {
   }
 });
 
+async function handleUpdateTruck(req, res, next) {
+  const truckId = Number(req.params.id || req.body.truckId || req.body.id);
+  const truckNo = req.body.truckNo !== undefined ? String(req.body.truckNo || '').trim().toUpperCase() : null;
+  const unitId = req.body.unitId !== undefined && req.body.unitId !== null ? Number(req.body.unitId) : null;
+  const deliveryTo = req.body.deliveryTo ? String(req.body.deliveryTo).trim() : null;
+
+  if (!Number.isInteger(truckId) || truckId < 1) {
+    return res.status(400).json({ error: 'Invalid truck ID.' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const existing = await client.query('SELECT id, receipt_id, party_id, unit_id, truck_no FROM trucks WHERE id = $1', [truckId]);
+    if (!existing.rowCount) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Truck entry not found.' });
+    }
+    const receiptId = existing.rows[0].receipt_id;
+    const closed = await client.query('SELECT closed_at FROM receipts WHERE id = $1', [receiptId]);
+    if (closed.rows[0]?.closed_at) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'This RR is closed.' });
+    }
+
+    if (unitId) {
+      const unitCheck = await client.query('SELECT id, party_id, name FROM party_units WHERE id = $1', [unitId]);
+      if (unitCheck.rowCount) {
+        await client.query('UPDATE trucks SET unit_id = $1, party_id = COALESCE(trucks.party_id, $2) WHERE id = $3', [unitId, unitCheck.rows[0].party_id, truckId]);
+      }
+    } else if (deliveryTo) {
+      const unitCheck = await client.query(
+        'SELECT id, party_id FROM party_units WHERE UPPER(TRIM(name)) = UPPER(TRIM($1)) LIMIT 1',
+        [deliveryTo]
+      );
+      if (unitCheck.rowCount) {
+        await client.query('UPDATE trucks SET unit_id = $1, party_id = COALESCE(trucks.party_id, $2) WHERE id = $3', [unitCheck.rows[0].id, unitCheck.rows[0].party_id, truckId]);
+      }
+    }
+
+    if (truckNo) {
+      await client.query('UPDATE trucks SET truck_no = $1 WHERE id = $2', [truckNo, truckId]);
+      await client.query(`
+        WITH numbered AS (
+          SELECT id, ROW_NUMBER() OVER (PARTITION BY receipt_id, UPPER(TRIM(truck_no)) ORDER BY sno, id) AS calc_trip
+          FROM trucks
+          WHERE receipt_id = $1
+        )
+        UPDATE trucks t
+        SET trip = n.calc_trip
+        FROM numbered n
+        WHERE t.id = n.id
+      `, [receiptId]);
+    }
+
+    await client.query('COMMIT');
+    const saved = await pool.query(`${truckSelect} WHERE t.id = $1`, [truckId]);
+    res.json({ truck: mapTruck(saved.rows[0]) });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    next(error);
+  } finally {
+    client.release();
+  }
+}
+
+app.get('/api/trucks/:id', requireAuth, async (req, res, next) => {
+  try {
+    const truckId = Number(req.params.id);
+    const truck = await pool.query(`${truckSelect} WHERE t.id = $1`, [truckId]);
+    if (!truck.rowCount) return res.status(404).json({ error: 'Truck not found.' });
+    res.json({ truck: mapTruck(truck.rows[0]) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.put('/api/trucks/:id', requireAuth, handleUpdateTruck);
+app.post('/api/trucks/:id', requireAuth, handleUpdateTruck);
+app.put('/api/trucks', requireAuth, handleUpdateTruck);
+
 const loadSelect = `
   SELECT t.id, t.sno, t.trip, t.truck_date::text AS truck_date, t.truck_no,
          r.rr_no, to_char(r.rr_date, 'DD-MM-YYYY') AS rr_date, r.fnr,
