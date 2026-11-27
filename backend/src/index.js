@@ -986,7 +986,7 @@ const truckSelect = `
          r.station_from, r.station_to, r.commodity_description,
          COALESCE(p.name, '') AS party_name,
          COALESCE(u.name, '') AS delivery_to,
-         t.receipt_id
+         t.receipt_id, t.party_id, t.unit_id
   FROM trucks t
   JOIN receipts r ON r.id = t.receipt_id
   LEFT JOIN parties p ON p.id = t.party_id
@@ -1000,6 +1000,8 @@ function mapTruck(row) {
     sno: row.sno,
     trip: Number(row.trip) || 1,
     receiptId: row.receipt_id,
+    partyId: row.party_id || null,
+    unitId: row.unit_id || null,
     date: day && month && year ? `${day}-${month}-${year}` : row.truck_date,
     truckNo: row.truck_no,
     commodity: row.commodity_description || '',
@@ -1014,6 +1016,26 @@ function mapTruck(row) {
   };
 }
 
+async function getPartiesWithUnits() {
+  const partyRows = await pool.query(
+    `SELECT p.id AS party_id, p.name AS party_name, u.id AS unit_id, u.name AS unit_name
+     FROM parties p
+     LEFT JOIN party_units u ON u.party_id = p.id AND u.status = 'ACTIVE'
+     WHERE p.status = 'ACTIVE'
+     ORDER BY p.name, u.name`
+  );
+  const parties = [];
+  for (const row of partyRows.rows) {
+    let party = parties.find((item) => item.id === row.party_id);
+    if (!party) {
+      party = { id: row.party_id, name: row.party_name, units: [] };
+      parties.push(party);
+    }
+    if (row.unit_id) party.units.push({ id: row.unit_id, name: row.unit_name });
+  }
+  return parties;
+}
+
 app.get('/api/trucks', requireAuth, async (_req, res, next) => {
   try {
     const sources = await pool.query(
@@ -1024,22 +1046,7 @@ app.get('/api/trucks', requireAuth, async (_req, res, next) => {
        ORDER BY started_at DESC NULLS LAST, id DESC`
     );
     const trucks = await pool.query(`${truckSelect} ORDER BY t.sno DESC`);
-    const partyRows = await pool.query(
-      `SELECT p.id AS party_id, p.name AS party_name, u.id AS unit_id, u.name AS unit_name
-       FROM parties p
-       LEFT JOIN party_units u ON u.party_id = p.id AND u.status = 'ACTIVE'
-       WHERE p.status = 'ACTIVE'
-       ORDER BY p.name, u.name`
-    );
-    const parties = [];
-    for (const row of partyRows.rows) {
-      let party = parties.find((item) => item.id === row.party_id);
-      if (!party) {
-        party = { id: row.party_id, name: row.party_name, units: [] };
-        parties.push(party);
-      }
-      if (row.unit_id) party.units.push({ id: row.unit_id, name: row.unit_name });
-    }
+    const parties = await getPartiesWithUnits();
     const next = await pool.query(
       `SELECT r.id, COALESCE(MAX(t.sno), 0) + 1 AS next_sno
        FROM receipts r
@@ -1102,7 +1109,8 @@ const loadSelect = `
          r.station_from, r.station_to, r.commodity_description,
          COALESCE(p.name, '') AS party_name,
          COALESCE(u.name, '') AS delivery_to,
-         r.id AS receipt_id, r.closed_at,
+         t.receipt_id, t.party_id, t.unit_id,
+         r.closed_at,
          l.id AS load_id, l.bags, l.set_no, l.wagon_id, w.wagon_no
   FROM trucks t
   JOIN receipts r ON r.id = t.receipt_id
@@ -1112,13 +1120,14 @@ const loadSelect = `
   LEFT JOIN wagons w ON w.id = l.wagon_id
 `;
 
-function mapLoad(row, sets = []) {
+function mapLoad(row, sets = [], partyUnits = []) {
   const truck = mapTruck(row);
   return {
     ...truck,
     receiptId: row.receipt_id,
     closed: Boolean(row.closed_at),
     sets,
+    partyUnits,
     load: row.load_id ? {
       id: row.load_id,
       bags: row.bags,
@@ -1199,10 +1208,13 @@ app.get('/api/loads', requireAuth, async (_req, res, next) => {
        WHERE status = 'submitted' AND closed_at IS NOT NULL
        ORDER BY closed_at DESC, id DESC`
     );
+    const parties = await getPartiesWithUnits();
+    const partyUnitsMap = new Map(parties.map((p) => [p.id, p.units]));
     const sets = await setsByReceipt(result.rows.map((row) => row.receipt_id));
     res.json({
       sources: sources.rows.map(mapSource),
-      trucks: result.rows.map((row) => mapLoad(row, sets.get(row.receipt_id) || [])),
+      trucks: result.rows.map((row) => mapLoad(row, sets.get(row.receipt_id) || [], partyUnitsMap.get(row.party_id) || [])),
+      parties,
       closed: closed.rows.map((row) => ({
         id: row.id,
         rrNo: row.rr_no,
@@ -1327,12 +1339,126 @@ app.post('/api/loads', requireAuth, async (req, res, next) => {
       [truckId, bags, setNo, wagonId, req.user.id]
     );
     await client.query('COMMIT');
+    const parties = await getPartiesWithUnits();
+    const partyUnitsMap = new Map(parties.map((p) => [p.id, p.units]));
     const saved = await pool.query(`${loadSelect} WHERE t.id = $1`, [truckId]);
     const sets = await setsFor(receiptId);
-    res.status(201).json({ truck: mapLoad(saved.rows[0], sets), loadId: inserted.rows[0].id });
+    res.status(201).json({
+      truck: mapLoad(saved.rows[0], sets, partyUnitsMap.get(saved.rows[0].party_id) || []),
+      loadId: inserted.rows[0].id,
+    });
   } catch (error) {
     await client.query('ROLLBACK');
     if (error.code === '23505') return res.status(409).json({ error: 'This truck already has a load entry.' });
+    next(error);
+  } finally {
+    client.release();
+  }
+});
+
+app.put('/api/loads/:truckId', requireAuth, async (req, res, next) => {
+  const truckId = Number(req.params.truckId || req.body.truckId);
+  const bags = Number(req.body.bags);
+  const setNo = Number(req.body.setNo);
+  const wagonId = Number(req.body.wagonId);
+  const truckNo = req.body.truckNo !== undefined ? String(req.body.truckNo || '').trim().toUpperCase() : null;
+  const unitId = req.body.unitId !== undefined && req.body.unitId !== null ? Number(req.body.unitId) : null;
+
+  if (!Number.isInteger(truckId) || truckId < 1) return res.status(400).json({ error: 'Invalid truck ID.' });
+  if (!Number.isInteger(bags) || bags < 1) return res.status(400).json({ error: 'Enter the number of bags.' });
+  if (!Number.isInteger(setNo) || setNo < 1 || setNo > 18) return res.status(400).json({ error: 'Choose a set number from 1 to 18.' });
+  if (!Number.isInteger(wagonId) || wagonId < 1) return res.status(400).json({ error: 'Choose the wagon number.' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const truck = await client.query('SELECT id, receipt_id, party_id, unit_id, truck_no FROM trucks WHERE id = $1', [truckId]);
+    if (!truck.rowCount) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Truck entry not found.' });
+    }
+    const receiptId = truck.rows[0].receipt_id;
+    const closed = await client.query('SELECT closed_at, started_at FROM receipts WHERE id = $1', [receiptId]);
+    if (closed.rows[0]?.closed_at) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'This RR is closed.' });
+    }
+
+    const wagon = await client.query(
+      `SELECT id, wagon_no, article_count, shed_no
+       FROM wagons
+       WHERE id = $1 AND receipt_id = $2
+       FOR UPDATE`,
+      [wagonId, receiptId]
+    );
+    if (!wagon.rowCount || String(wagon.rows[0].shed_no) !== String(setNo)) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Choose a wagon from the selected set.' });
+    }
+
+    // Exclude this truck's current load when checking wagon available bags
+    const used = await client.query(
+      'SELECT COALESCE(SUM(bags), 0)::int AS used_bags FROM loads WHERE wagon_id = $1 AND truck_id <> $2',
+      [wagonId, truckId]
+    );
+    const balanceBags = wagon.rows[0].article_count - used.rows[0].used_bags;
+    if (bags > balanceBags) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: `Wagon ${wagon.rows[0].wagon_no} has ${balanceBags} bags left.` });
+    }
+
+    // Validate and update delivery unit if provided
+    if (unitId) {
+      const partyId = truck.rows[0].party_id;
+      const unitCheck = await client.query(
+        'SELECT id FROM party_units WHERE id = $1 AND party_id = $2',
+        [unitId, partyId]
+      );
+      if (!unitCheck.rowCount) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Choose a valid delivery unit for this party.' });
+      }
+      await client.query('UPDATE trucks SET unit_id = $1 WHERE id = $2', [unitId, truckId]);
+    }
+
+    // Update truck number if provided
+    if (truckNo) {
+      await client.query('UPDATE trucks SET truck_no = $1 WHERE id = $2', [truckNo, truckId]);
+      // Recalculate trip numbers for this receipt so all trips stay in correct sequence
+      await client.query(`
+        WITH numbered AS (
+          SELECT id, ROW_NUMBER() OVER (PARTITION BY receipt_id, UPPER(TRIM(truck_no)) ORDER BY sno, id) AS calc_trip
+          FROM trucks
+          WHERE receipt_id = $1
+        )
+        UPDATE trucks t
+        SET trip = n.calc_trip
+        FROM numbered n
+        WHERE t.id = n.id
+      `, [receiptId]);
+    }
+
+    // Upsert load
+    await client.query(
+      `INSERT INTO loads (truck_id, bags, set_no, wagon_id, created_by)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (truck_id)
+       DO UPDATE SET bags = EXCLUDED.bags, set_no = EXCLUDED.set_no, wagon_id = EXCLUDED.wagon_id`,
+      [truckId, bags, setNo, wagonId, req.user.id]
+    );
+
+    await client.query('COMMIT');
+
+    const parties = await getPartiesWithUnits();
+    const partyUnitsMap = new Map(parties.map((p) => [p.id, p.units]));
+    const saved = await pool.query(`${loadSelect} WHERE t.id = $1`, [truckId]);
+    const sets = await setsFor(receiptId);
+    const row = saved.rows[0];
+    res.json({
+      truck: mapLoad(row, sets, partyUnitsMap.get(row.party_id) || []),
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
     next(error);
   } finally {
     client.release();
