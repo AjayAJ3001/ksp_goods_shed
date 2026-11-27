@@ -1292,6 +1292,10 @@ app.post('/api/loads', requireAuth, async (req, res, next) => {
   const bags = Number(req.body.bags);
   const setNo = Number(req.body.setNo);
   const wagonId = Number(req.body.wagonId);
+  const truckNo = req.body.truckNo !== undefined ? String(req.body.truckNo || '').trim().toUpperCase() : null;
+  const unitId = req.body.unitId !== undefined && req.body.unitId !== null ? Number(req.body.unitId) : null;
+  const deliveryTo = req.body.deliveryTo ? String(req.body.deliveryTo).trim() : null;
+
   if (!Number.isInteger(bags) || bags < 1) return res.status(400).json({ error: 'Enter the number of bags.' });
   if (!Number.isInteger(setNo) || setNo < 1 || setNo > 18) return res.status(400).json({ error: 'Choose a set number from 1 to 18.' });
   if (!Number.isInteger(wagonId) || wagonId < 1) return res.status(400).json({ error: 'Choose the wagon number.' });
@@ -1299,7 +1303,7 @@ app.post('/api/loads', requireAuth, async (req, res, next) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const truck = await client.query('SELECT id, receipt_id FROM trucks WHERE id = $1', [truckId]);
+    const truck = await client.query('SELECT id, receipt_id, party_id, unit_id, truck_no FROM trucks WHERE id = $1', [truckId]);
     if (!truck.rowCount) {
       await client.query('ROLLBACK');
       return res.status(400).json({ error: 'Choose a truck entry.' });
@@ -1326,16 +1330,54 @@ app.post('/api/loads', requireAuth, async (req, res, next) => {
       return res.status(400).json({ error: 'Choose a wagon from the selected set.' });
     }
     const used = await client.query(
-      'SELECT COALESCE(SUM(bags), 0)::int AS used_bags FROM loads WHERE wagon_id = $1',
-      [wagonId]
+      'SELECT COALESCE(SUM(bags), 0)::int AS used_bags FROM loads WHERE wagon_id = $1 AND truck_id <> $2',
+      [wagonId, truckId]
     );
     const balanceBags = wagon.rows[0].article_count - used.rows[0].used_bags;
     if (bags > balanceBags) {
       await client.query('ROLLBACK');
       return res.status(400).json({ error: `Wagon ${wagon.rows[0].wagon_no} has ${balanceBags} bags left.` });
     }
+
+    if (unitId) {
+      const unitCheck = await client.query(
+        'SELECT id, party_id, name FROM party_units WHERE id = $1',
+        [unitId]
+      );
+      if (unitCheck.rowCount) {
+        await client.query('UPDATE trucks SET unit_id = $1, party_id = COALESCE(party_id, $2) WHERE id = $3', [unitId, unitCheck.rows[0].party_id, truckId]);
+      }
+    } else if (deliveryTo) {
+      const unitCheck = await client.query(
+        'SELECT id, party_id FROM party_units WHERE UPPER(TRIM(name)) = UPPER(TRIM($1)) LIMIT 1',
+        [deliveryTo]
+      );
+      if (unitCheck.rowCount) {
+        await client.query('UPDATE trucks SET unit_id = $1, party_id = COALESCE(party_id, $2) WHERE id = $3', [unitCheck.rows[0].id, unitCheck.rows[0].party_id, truckId]);
+      }
+    }
+
+    if (truckNo) {
+      await client.query('UPDATE trucks SET truck_no = $1 WHERE id = $2', [truckNo, truckId]);
+      await client.query(`
+        WITH numbered AS (
+          SELECT id, ROW_NUMBER() OVER (PARTITION BY receipt_id, UPPER(TRIM(truck_no)) ORDER BY sno, id) AS calc_trip
+          FROM trucks
+          WHERE receipt_id = $1
+        )
+        UPDATE trucks t
+        SET trip = n.calc_trip
+        FROM numbered n
+        WHERE t.id = n.id
+      `, [receiptId]);
+    }
+
     const inserted = await client.query(
-      `INSERT INTO loads (truck_id, bags, set_no, wagon_id, created_by) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+      `INSERT INTO loads (truck_id, bags, set_no, wagon_id, created_by)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (truck_id)
+       DO UPDATE SET bags = EXCLUDED.bags, set_no = EXCLUDED.set_no, wagon_id = EXCLUDED.wagon_id
+       RETURNING id`,
       [truckId, bags, setNo, wagonId, req.user.id]
     );
     await client.query('COMMIT');
@@ -1349,7 +1391,6 @@ app.post('/api/loads', requireAuth, async (req, res, next) => {
     });
   } catch (error) {
     await client.query('ROLLBACK');
-    if (error.code === '23505') return res.status(409).json({ error: 'This truck already has a load entry.' });
     next(error);
   } finally {
     client.release();

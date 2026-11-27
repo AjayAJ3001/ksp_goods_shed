@@ -110,19 +110,31 @@ export default function Loads() {
     setEditBusy(true);
     setEditError('');
     const resolvedUnit = editUnits.find((u) => u.id === editUnitId);
+    const payload = {
+      truckId: editingTruck.id,
+      truckNo: editTruckNo.trim().toUpperCase(),
+      unitId: editUnitId,
+      deliveryTo: resolvedUnit?.name || editingTruck.deliveryTo,
+      bags: count,
+      setNo: editSetNo,
+      wagonId: editWagonId,
+    };
     try {
-      await api(`/api/loads/${editingTruck.id}`, {
-        method: 'PUT',
-        body: {
-          truckId: editingTruck.id,
-          truckNo: editTruckNo.trim().toUpperCase(),
-          unitId: editUnitId,
-          deliveryTo: resolvedUnit?.name || editingTruck.deliveryTo,
-          bags: count,
-          setNo: editSetNo,
-          wagonId: editWagonId,
-        },
-      });
+      try {
+        await api(`/api/loads/${editingTruck.id}`, {
+          method: 'PUT',
+          body: payload,
+        });
+      } catch (putErr) {
+        if (putErr.message && (putErr.message.includes('404') || putErr.message.includes('Cannot PUT'))) {
+          await api('/api/loads', {
+            method: 'POST',
+            body: payload,
+          });
+        } else {
+          throw putErr;
+        }
+      }
       closeEdit();
       loadData();
     } catch (err) {
@@ -132,12 +144,18 @@ export default function Loads() {
     }
   }
 
+  const totalBagsTaken = trucks.reduce((sum, t) => sum + (Number(t.load?.bags) || 0), 0);
+  const loadedTrucksCount = trucks.filter((t) => t.load?.bags != null).length;
+
   return (
     <div>
       <div className="page-title">
         <div>
           <div className="mark">Open RR</div>
           <h1>Load entry</h1>
+          <p>
+            <strong>{loadedTrucksCount}</strong> of <strong>{trucks.length}</strong> trucks loaded · Total bags taken: <strong>{totalBagsTaken}</strong>
+          </p>
         </div>
       </div>
       {error && <div className="banner">{error}</div>}
